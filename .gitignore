@@ -12,6 +12,9 @@ __pycache__/
 data/
 new_data/
 
+# 学习和实验脚本
+learning/
+
 # 运行日志
 logs/
 *.log

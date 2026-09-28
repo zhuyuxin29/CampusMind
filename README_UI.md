@@ -46,11 +46,11 @@ CAMPUSMIND_COLLECTION=campus_handbook_bge_m3_v2
 
 ## 安装与测试
 
-现有项目依赖之外，新增的界面依赖记录在 `requirements-ui.txt`：
+界面依赖已包含在根目录 `requirements.txt` 中：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-ui.txt
-.\.venv\Scripts\python.exe -m unittest test_app
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
 界面测试使用模拟回答，不会调用付费模型接口。

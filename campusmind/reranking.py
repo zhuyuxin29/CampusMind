@@ -24,7 +24,6 @@ from langchain_core.documents import Document
 from campusmind.knowledge_base import (
     COLLECTION_NAME,
     load_parent_documents,
-    open_vector_store,
 )
 from campusmind.query_processing import (
     ClarificationNeeded,
@@ -34,11 +33,7 @@ from campusmind.query_processing import (
     validate_question,
 )
 from campusmind.retrieval import (
-    CANDIDATE_K,
-    RECALL_K,
-    HybridRetriever,
-    build_bm25_retriever,
-    build_vector_retriever,
+    build_hybrid_retriever,
     retrieve_candidates,
     format_document_source,
 )
@@ -264,37 +259,8 @@ def main() -> None:
     logging.basicConfig(level=logging.WARNING)
     jieba.setLogLevel(logging.WARNING)
 
-    # 1. 打开已有知识库，读取文字建立 BM25
-    store = open_vector_store(COLLECTION_NAME)
-    stored = store.get(include=["documents", "metadatas"])
-
-    if not stored["ids"]:
-        raise ValueError("知识库为空，请先完成资料入库。")
-
-    documents = [
-        Document(
-            page_content=text,
-            metadata=metadata or {},
-        )
-        for text, metadata in zip(
-            stored["documents"],
-            stored["metadatas"],
-        )
-        if isinstance(text, str) and text.strip()
-    ]
-
-    if not documents:
-        raise ValueError("知识库中没有有效文字。")
-
-    # 启动时创建一次，后续提问复用
-    retriever = HybridRetriever(
-        bm25_retriever=build_bm25_retriever(documents),
-        vector_retriever=build_vector_retriever(
-            store,
-            k=min(RECALL_K, len(documents)),
-        ),
-        top_k=CANDIDATE_K,
-    )
+    # 启动时创建一次混合检索器，后续提问复用
+    retriever = build_hybrid_retriever(COLLECTION_NAME)
 
     print("===== 混合召回＋重排测试 =====")
     print(f"集合：{COLLECTION_NAME}；父级最多 {CONTEXT_TOP_N} 份，正文预算 {MAX_CONTEXT_CHARS} 字")

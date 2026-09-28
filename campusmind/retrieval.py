@@ -234,6 +234,36 @@ def retrieve_candidates(
     )
 
 
+def build_hybrid_retriever(
+    collection_name: str = COLLECTION_NAME,
+    *,
+    top_k: int = CANDIDATE_K,
+) -> HybridRetriever:
+    """打开集合、读取子片段并建立 BM25 + 向量混合检索器。
+
+    供在线问答服务与各调试入口复用；校验知识库非空、记录完整且文字与元数据有效。
+    """
+    store = open_vector_store(collection_name)
+    stored = store.get(include=["documents", "metadatas"])
+    ids = stored.get("ids") or []
+    texts = stored.get("documents") or []
+    metadatas = stored.get("metadatas") or []
+    if not ids or not (len(ids) == len(texts) == len(metadatas)):
+        raise ValueError("知识库为空或记录不完整，请检查入库结果。")
+    documents = []
+    for text, metadata in zip(texts, metadatas):
+        if not isinstance(text, str) or not text.strip() or not isinstance(metadata, dict):
+            raise ValueError("知识库包含无效文字或元数据。")
+        documents.append(Document(page_content=text, metadata=metadata))
+    if not documents:
+        raise ValueError("知识库中没有有效文字。")
+    return HybridRetriever(
+        bm25_retriever=build_bm25_retriever(documents),
+        vector_retriever=build_vector_retriever(store, k=min(RECALL_K, len(documents))),
+        top_k=top_k,
+    )
+
+
 def format_document_source(doc: Document) -> str:
     """展示章节及资料实际覆盖的 PDF 起止页，兼容旧单页元数据。"""
     metadata = doc.metadata
@@ -250,41 +280,10 @@ def main() -> None:
     logging.basicConfig(level=logging.WARNING)
     jieba.setLogLevel(logging.WARNING)
 
-    # 1. 打开已有数据库，不执行资料入库
-    store = open_vector_store(COLLECTION_NAME)
+    # 启动时建立一次混合检索器，后续提问复用。
+    retriever = build_hybrid_retriever(COLLECTION_NAME)
 
-    # BM25 需要原文；不需要读取已保存的向量
-    stored = store.get(include=["documents", "metadatas"])
-
-    if not stored["ids"]:
-        raise ValueError("知识库为空，请先完成入库。")
-
-    documents = [
-        Document(
-            page_content=text,
-            metadata=metadata or {},
-        )
-        for text, metadata in zip(
-            stored["documents"],
-            stored["metadatas"],
-        )
-        if isinstance(text, str) and text.strip()
-    ]
-
-    if not documents:
-        raise ValueError("知识库中没有有效文字。")
-
-    # 2. 启动时建立一次 BM25，并创建向量检索器
-    retriever = HybridRetriever(
-        bm25_retriever=build_bm25_retriever(documents),
-        vector_retriever=build_vector_retriever(
-            store,
-            k=min(RECALL_K, len(documents)),
-        ),
-        top_k=CANDIDATE_K,
-    )
-
-    print(f"集合：{COLLECTION_NAME}；已加载 {len(documents)} 个子片段")
+    print(f"集合：{COLLECTION_NAME}；混合检索器已就绪")
     print("输入完整问题开始检索，输入 exit 退出。")
     print("当前是检索测试，不保存多轮对话，也不生成回答。")
 

@@ -182,28 +182,15 @@ def main() -> None:
     """复用已有检索、重排和会话模块，启动时只建立一次检索器。"""
     import logging
     import jieba
-    from campusmind.knowledge_base import COLLECTION_NAME, open_vector_store
+    from campusmind.knowledge_base import COLLECTION_NAME
     from campusmind.query_processing import ClarificationNeeded, contextualize_question, normalize_queries, rewrite_queries
     from campusmind.reranking import rerank_documents, select_context
-    from campusmind.retrieval import CANDIDATE_K, RECALL_K, HybridRetriever, build_bm25_retriever, build_vector_retriever, retrieve_candidates
+    from campusmind.retrieval import build_hybrid_retriever, retrieve_candidates
     from campusmind.session_manager import ChatSession
 
     logging.basicConfig(level=logging.WARNING)
     jieba.setLogLevel(logging.WARNING)
-    store = open_vector_store(COLLECTION_NAME)
-    stored = store.get(include=["documents", "metadatas"])
-    documents = [
-        Document(page_content=text, metadata=metadata or {})
-        for text, metadata in zip(stored["documents"], stored["metadatas"])
-        if isinstance(text, str) and text.strip()
-    ]
-    if not documents:
-        raise ValueError("知识库为空，请先完成资料入库。")
-    retriever = HybridRetriever(
-        bm25_retriever=build_bm25_retriever(documents),
-        vector_retriever=build_vector_retriever(store, k=min(RECALL_K, len(documents))),
-        top_k=CANDIDATE_K,
-    )
+    retriever = build_hybrid_retriever(COLLECTION_NAME)
     session = ChatSession(history_rounds=HISTORY_ROUNDS)
     print("===== CampusMind 问答 =====\n输入 exit 退出，clear 清空会话。")
     while True:

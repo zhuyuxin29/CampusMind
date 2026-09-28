@@ -4,6 +4,10 @@ status: answered / insufficient / needs_clarification / invalid_input / error。
 timings_ms 的单位是毫秒，未执行的阶段为 None；首次初始化耗时单独记录。
 服务复用检索资源，ChatSession 必须由界面为每个用户单独创建。
 同一会话的请求应串行提交。知识库重建后重启服务以重新加载缓存。
+
+并发：检索资源（HybridRetriever 与父级快照）在首次请求时经 _resource_lock
+惰性初始化，之后只读、不再变更，因此不同会话的 ask() 可并发调用；
+同一 ChatSession 仍需串行（历史为可变状态，未加锁）。
 """
 
 from config import (
@@ -50,7 +54,12 @@ STAGE_LABELS = dict(zip(STAGES, (
 
 
 class QAService:
-    """延迟加载并复用知识库及 BM25；不在服务中保存用户聊天历史。"""
+    """延迟加载并复用知识库及 BM25；不在服务中保存用户聊天历史。
+
+    线程安全：_get_resources() 用锁保证惰性初始化只执行一次；初始化完成后
+    共享的检索资源只读，因此多个会话可并发调用 ask()。ChatSession 属于单个
+    用户的可变状态，仍应由界面保证同一会话内串行提交。
+    """
 
     def __init__(self, collection_name: str = COLLECTION_NAME):
         self.collection_name = collection_name
@@ -83,6 +92,7 @@ class QAService:
                 top_k=CANDIDATE_K,
             )
             # 只有全部初始化成功才缓存；失败后下次调用允许重试。
+            # 赋值后 _resources 不再修改，后续并发只读访问是安全的。
             self._resources = (retriever, parents)
             return self._resources
 
