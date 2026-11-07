@@ -47,7 +47,8 @@ CampusMind/
 │   ├── reranking.py            # 重排与父级上下文选择
 │   ├── generation.py           # 提示词、回答生成与引用检查
 │   ├── session_manager.py      # 会话历史
-│   └── qa_service.py           # 统一问答服务
+│   ├── qa_service.py           # 统一问答服务
+│   └── cli.py                  # 分阶段调试 CLI
 ├── new_data/               # 原始 PDF、OCR、结构化结果与向量库
 ├── evaluation/             # 问答效果评估
 └── tests/                  # 离线功能测试
@@ -122,6 +123,26 @@ CAMPUSMIND_COLLECTION=campus_handbook_bge_m3_v2
 ```cmd
 .\.venv\Scripts\python.exe main.py
 ```
+
+## 分阶段调试（CLI）
+
+不开网页即可在终端分阶段查看问答流水线的中间结果，便于定位问题出在检索、重排还是生成：
+
+```cmd
+.\.venv\Scripts\python.exe -m campusmind.cli --stage query
+.\.venv\Scripts\python.exe -m campusmind.cli --stage retrieve
+.\.venv\Scripts\python.exe -m campusmind.cli --stage rerank
+.\.venv\Scripts\python.exe -m campusmind.cli --stage answer
+```
+
+| 阶段 | 查看内容 |
+|---|---|
+| `query` | 问题补全与改写后的检索查询 |
+| `retrieve` | 混合召回出的候选片段 |
+| `rerank` | 重排后的排名与最终父级上下文 |
+| `answer` | 完整回答与引用来源（调用回答模型，保存会话） |
+
+`answer` 阶段可用 `clear` 清空会话，`exit` 退出。
 
 ## 测试与评估
 
