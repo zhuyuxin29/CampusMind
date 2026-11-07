@@ -17,6 +17,8 @@ from functools import lru_cache
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
+from campusmind.errors import ServiceError
+
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +236,7 @@ def contextualize_question(
         raise
     except Exception as exc:
         # 补全失败时停止，避免拿一个失去上下文的追问直接检索
-        raise RuntimeError(
+        raise ServiceError(
             f"问题补全失败（{type(exc).__name__}），"
             "请重试或把问题写完整。"
         ) from exc

@@ -58,6 +58,32 @@ class ModuleTests(unittest.TestCase):
         result = r.select_context([child("a")], max_chars=10, parent_map=parents)
         self.assertFalse(result[0].metadata["context_incomplete"])
 
+    def test_budget_stats(self):
+        # P1-3：即使全部父级被跳过（返回空列表），也要通过 stats 报告裁剪。
+        parents = {"a": parent("a", "12345"), "b": parent("b", "123456")}
+        stats = {}
+        result = r.select_context(
+            [child("a"), child("b")], max_chars=9, parent_map=parents, stats=stats
+        )
+        self.assertEqual([d.metadata["parent_id"] for d in result], ["a"])
+        self.assertTrue(stats["truncated"])
+        self.assertEqual(stats["selected_count"], 1)
+        self.assertEqual(stats["skipped_count"], 1)
+        self.assertEqual(stats["context_chars"], 5)
+
+        empty_stats = {}
+        result = r.select_context(
+            [child("a")], max_chars=2,
+            parent_map={"a": parent("a", "123")}, stats=empty_stats,
+        )
+        self.assertEqual(result, [])
+        self.assertTrue(empty_stats["truncated"])
+        self.assertEqual(empty_stats["selected_count"], 0)
+
+    def test_stats_type_validation(self):
+        with self.assertRaises(ValueError):
+            r.select_context([], stats=[])
+
     def test_parse_rerank_results_maps_and_sorts(self):
         candidates = [
             Document(page_content="甲", metadata={"chunk_id": "a"}),

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch, Mock
 
 from langchain_core.documents import Document
+from campusmind.errors import ServiceError
 from campusmind.session_manager import ChatSession
 from campusmind import qa_service as q
 
@@ -26,6 +27,7 @@ class ServiceTests(unittest.TestCase):
         }.items():
             self.mocks[name] = self.stack.enter_context(patch.object(q, name, return_value=value))
         self.resource = self.stack.enter_context(patch.object(self.service, "_get_resources", return_value=(Mock(), {})))
+        self.stack.enter_context(patch.object(q, "missing_api_keys", return_value=[]))
 
     def test_success_saved_once_with_pages_and_timings(self):
         result = self.service.ask(" 原始问题 ", self.session)
@@ -41,6 +43,17 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "invalid_input")
         self.resource.assert_not_called()
         self.assertIsNone(result["timings_ms"]["generate"])
+
+    def test_missing_api_keys_is_config_error(self):
+        # 没填 .env 时直接提示配置问题，而不是误报网络/额度故障。
+        with patch.object(q, "missing_api_keys", return_value=["DEEPSEEK_API_KEY"]):
+            result = self.service.ask("问题", self.session)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_stage"], "config")
+        self.assertIn("DEEPSEEK_API_KEY", result["message"])
+        self.assertIn(".env", result["message"])
+        self.assertFalse(result["saved"])
+        self.resource.assert_not_called()
 
     def test_clarification_not_saved(self):
         self.mocks["contextualize_question"].side_effect = q.ClarificationNeeded("哪种奖学金？")
@@ -99,6 +112,16 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("网络", result["message"])
 
+    def test_service_error_message_is_kept(self):
+        # P1-2：项目内安全异常的中文说明不能被泛化成“网络/额度”提示。
+        self.mocks["generate_answer"].side_effect = ServiceError(
+            "模型未正常完成回答，请重试或缩小问题范围。"
+        )
+        result = self.service.ask("问题", self.session)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_stage"], "generate")
+        self.assertEqual(result["message"], "模型未正常完成回答，请重试或缩小问题范围。")
+
     def test_model_insufficient(self):
         self.mocks["generate_answer"].return_value = q.make_insufficient_answer()
         result = self.service.ask("问题", self.session)
@@ -135,6 +158,20 @@ class ServiceTests(unittest.TestCase):
         )]
         result = self.service.ask("问题", self.session)
         self.assertEqual(result["status"], "answered")
+        self.assertTrue(result["context_incomplete"])
+
+    def test_context_incomplete_when_all_parents_skipped(self):
+        # P1-3：所有父级都因预算被跳过、docs 为空时也要保留裁剪标记。
+        def fake_select(ranked, **kwargs):
+            kwargs["stats"].update(
+                {"truncated": True, "selected_count": 0, "skipped_count": 1}
+            )
+            return []
+
+        self.mocks["select_context"].side_effect = fake_select
+        result = self.service.ask("问题", self.session)
+        self.assertEqual(result["status"], "insufficient")
+        self.assertEqual(result["context_count"], 0)
         self.assertTrue(result["context_incomplete"])
 
     def test_history_and_session_isolation(self):

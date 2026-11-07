@@ -6,18 +6,20 @@
   python -m campusmind.cli --stage rerank      # 重排 + 父级扩展
   python -m campusmind.cli --stage answer      # 完整问答（调用模型，保存会话）
 
-各阶段共享同一个混合检索器；answer 阶段才调用回答模型并保存多轮历史。
-原先分散在 query_processing/retrieval/reranking/generation 各自 main() 的
-调试逻辑集中在此，各模块的 main() 仍可运行并委托到这里。
+各阶段共享同一个混合检索器；answer 阶段直接复用 QAService，与网页/终端
+入口保持相同的引用重试与降级行为。原先分散在 query_processing/retrieval/
+reranking/generation 各自 main() 的调试逻辑集中在此，各模块的 main() 仍可
+运行并委托到这里。
 """
 
 import argparse
+import json
 import logging
 
 import jieba
 
 from config import CONTEXT_TOP_N, HISTORY_ROUNDS
-from campusmind.generation import answer_question
+from campusmind.qa_service import QAService
 from campusmind.knowledge_base import COLLECTION_NAME
 from campusmind.query_processing import (
     ClarificationNeeded,
@@ -80,13 +82,24 @@ def _print_context(context_docs) -> None:
 
 
 def _print_answer(result: dict) -> None:
-    print(f"\n{result['answer']}")
-    if result["sources"]:
+    """打印完整问答结果；answer 阶段与网页入口使用同一份结果结构。"""
+    print(f"\n状态：{result.get('status', 'error')}")
+    print(result.get("answer") or result.get("message") or "本轮没有返回内容。")
+    if result.get("insufficient_reason"):
+        print(f"资料不足原因：{result['insufficient_reason']}")
+    if result.get("context_incomplete"):
+        print("提示：本轮有部分资料因上下文长度预算未纳入，回答可能不完整。")
+    sources = result.get("sources") or []
+    if sources:
         print("\n参考来源（PDF 页码）：")
-    for source in result["sources"]:
+    for source in sources:
         start, end = source["page_start"], source["page_end"]
         pages = "未知" if start is None else str(start) if end == start else f"{start}–{end}"
         print(f"[{source['citation_id']}] {source['file_name']}，第 {pages} 页")
+    timings = result.get("timings_ms") or {}
+    if timings:
+        print("\n阶段耗时（毫秒）：")
+        print(json.dumps(timings, ensure_ascii=False))
 
 
 def _resolve(question: str, history: list[dict]):
@@ -105,8 +118,10 @@ def run(stage: str) -> None:
     if stage not in STAGES:
         raise ValueError(f"未知阶段：{stage}，可选 {'/'.join(STAGES)}")
 
-    need_index = stage in {"retrieve", "rerank", "answer"}
+    need_index = stage in {"retrieve", "rerank"}
     retriever = build_hybrid_retriever(COLLECTION_NAME) if need_index else None
+    # answer 阶段复用统一问答服务，保留引用重试和失败降级行为。
+    service = QAService(COLLECTION_NAME) if stage == "answer" else None
     session = ChatSession(history_rounds=HISTORY_ROUNDS)
 
     print(f"===== CampusMind 调试 · 阶段：{stage} =====")
@@ -114,17 +129,24 @@ def run(stage: str) -> None:
     print("输入完整问题开始，exit 退出；answer 阶段可用 clear 清空会话。")
 
     while True:
-        question = input("\n请输入问题：").strip()
+        try:
+            question = input("\n请输入问题：").strip()
+        except (EOFError, KeyboardInterrupt):
+            # 与 main.py 一致：Ctrl+C / 关闭输入时正常退出，不打印堆栈。
+            print()
+            break
         if question.lower() in {"exit", "quit"}:
             break
-        if stage == "answer" and question.lower() == "clear":
-            session.clear()
-            print("会话已清空。")
+        if stage == "answer":
+            if question.lower() == "clear":
+                session.clear()
+                print("会话已清空。")
+                continue
+            _print_answer(service.ask(question, session))
             continue
 
         try:
-            history = session.get_recent_history() if stage == "answer" else []
-            standalone, queries = _resolve(question, history)
+            standalone, queries = _resolve(question, [])
 
             if stage == "query":
                 print(f"\n完整问题：{standalone}")
@@ -146,10 +168,6 @@ def run(stage: str) -> None:
                 _print_ranked(ranked_docs)
                 _print_context(context_docs)
                 continue
-
-            result = answer_question(standalone, context_docs, history)
-            session.add_turn(question, result["answer"], result["sources"])
-            _print_answer(result)
         except ClarificationNeeded as exc:
             print(f"需要补充信息：{exc}")
         except (ValueError, RuntimeError) as exc:

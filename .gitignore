@@ -2,6 +2,7 @@
 .venv/
 __pycache__/
 *.pyc
+jieba.cache
 
 # 本机密钥，保留配置示例
 .env

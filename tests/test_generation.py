@@ -8,6 +8,7 @@ from unittest.mock import patch, Mock
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage
 from campusmind import generation as g
+from campusmind.errors import ServiceError
 
 
 class GenerationTests(unittest.TestCase):
@@ -60,14 +61,15 @@ class GenerationTests(unittest.TestCase):
             self.assertEqual(g.answer_question("问题", self.docs)["status"], "insufficient")
 
     def test_model_failures(self):
+        # P1-2：截断、空回答和接口异常都抛可安全展示的 ServiceError。
         client = Mock()
         with patch.object(g, "_get_answer_llm", return_value=client):
             for response in (AIMessage(content=""), AIMessage(content="半句", response_metadata={"finish_reason": "length"})):
                 client.invoke.return_value = response
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(ServiceError):
                     g.generate_answer(["问题"])
             client.invoke.side_effect = TimeoutError("模拟超时")
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(ServiceError):
                 g.generate_answer(["问题"])
 
     def test_is_insufficient_answer_tolerates_noise(self):

@@ -10,7 +10,7 @@ timings_ms 的单位是毫秒，未执行的阶段为 None；首次初始化耗�
 同一 ChatSession 仍需串行（历史为可变状态，未加锁）。
 """
 
-from config import ANSWER_ATTEMPTS, COLLECTION_NAME, HISTORY_ROUNDS
+from config import ANSWER_ATTEMPTS, COLLECTION_NAME, HISTORY_ROUNDS, missing_api_keys
 
 import json
 import logging
@@ -18,6 +18,7 @@ from functools import lru_cache
 from threading import Lock
 from time import perf_counter
 
+from campusmind.errors import ServiceError
 from campusmind.generation import (
     CitationCheckFailed,
     build_citation_retry_messages,
@@ -54,6 +55,11 @@ STAGE_LABELS = dict(zip(STAGES, (
 
 def _failure_message(stage: str, exc: Exception) -> str:
     """按异常类型给出可操作提示，不暴露 SDK 原始正文。"""
+    # 项目内 ServiceError 的消息是给用户看的中文说明，可以原样展示。
+    if isinstance(exc, ServiceError):
+        message = str(exc).strip()
+        if message:
+            return message
     name = type(exc).__name__.lower()
     if isinstance(exc, TimeoutError) or "timeout" in name:
         return "服务响应超时，请稍后重试。"
@@ -111,6 +117,17 @@ class QAService:
             "timings_ms": {name: None for name in STAGES},
         }
 
+        # 没配置密钥时直接说明原因，避免被后面的阶段包装成“网络/额度不可用”。
+        missing = missing_api_keys()
+        if missing:
+            result.update(
+                status="error", error_stage="config",
+                message="未配置 " + "、".join(missing)
+                        + "，请在项目根目录 .env 中填写后重启应用。",
+            )
+            result["timings_ms"]["total"] = round((perf_counter() - started) * 1000, 3)
+            return result
+
         def run(name, function, *args, **kwargs):
             nonlocal stage
             stage = name
@@ -145,11 +162,16 @@ class QAService:
             insufficient_reason = None
             if candidates:
                 ranked = run("rerank", rerank_documents, standalone, candidates)
-                docs = run("select_context", select_context, ranked, parent_map=parents,
-                           collection_name=self.collection_name)
+                selection_stats = {}
+                docs = run(
+                    "select_context", select_context, ranked, parent_map=parents,
+                    collection_name=self.collection_name, stats=selection_stats,
+                )
                 result["context_count"] = len(docs)
-                result["context_incomplete"] = any(
-                    doc.metadata.get("context_incomplete") for doc in docs
+                # 全部父级都被预算跳过时 docs 为空，只能靠 stats 判断发生过裁剪。
+                result["context_incomplete"] = bool(
+                    selection_stats.get("truncated")
+                    or any(doc.metadata.get("context_incomplete") for doc in docs)
                 )
 
                 def prepare():

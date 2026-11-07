@@ -144,6 +144,8 @@ def render_result(result):
         st.caption("把具体类别或事项补充到完整问题里，再发给团团吧～")
     else:
         st.error(result.get("message") or "哎呀，这次查询没有完成，请稍后再试一下～")
+    if result.get("context_incomplete"):
+        st.caption("本轮有部分资料因上下文长度预算未纳入，回答可能不完整；可以补充更具体的问题再问一次。")
     render_sources(result.get("sources", []))
     timings = result.get("timings_ms", {})
     if timings:

@@ -21,6 +21,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
+from campusmind.errors import ServiceError
 from campusmind.query_processing import validate_question
 
 
@@ -144,12 +145,12 @@ def generate_answer(messages: list) -> str:
     try:
         response = llm.invoke(messages)
     except Exception as exc:
-        raise RuntimeError(f"回答生成失败（{type(exc).__name__}），请稍后重试。") from exc
+        raise ServiceError(f"回答生成失败（{type(exc).__name__}），请稍后重试。") from exc
     reason = response.response_metadata.get("finish_reason")
     if reason not in (None, "stop"):
-        raise RuntimeError("模型未正常完成回答，请重试或缩小问题范围。")
+        raise ServiceError("模型未正常完成回答，请重试或缩小问题范围。")
     if not isinstance(response.content, str) or not response.content.strip():
-        raise RuntimeError("模型没有返回有效的文本回答。")
+        raise ServiceError("模型没有返回有效的文本回答。")
     return response.content.strip()
 
 
@@ -284,7 +285,7 @@ def answer_question(question: str, documents: list[Document], history: list[dict
         sources = select_cited_sources(answer, source_map)
     except CitationCheckFailed as exc:
         # 不删除错误编号后展示原回答，也不把校验失败写进聊天历史。
-        raise RuntimeError("回答引用校验未通过（编号不存在、格式不正确或内容不支持），请重试。") from exc
+        raise ServiceError("回答引用校验未通过（编号不存在、格式不正确或内容不支持），请重试。") from exc
     return {"answer": answer, "sources": sources, "status": "answered"}
 
 

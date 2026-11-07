@@ -256,13 +256,29 @@ def get_index_status(store: Chroma) -> dict:
     return {"chunk_count": count, "is_empty": count == 0}
 
 
-def load_parent_documents(collection_name: str = COLLECTION_NAME) -> dict[str, Document]:
-    """读取该集合的父级快照；不读取后来可能被重新生成的 structured_v2。"""
+def load_index_manifest(collection_name: str = COLLECTION_NAME) -> dict:
+    """读取并校验集合版本记录；不读取父级或片段正文。
+
+    启动问答时用它交叉检查 Chroma 实际片段数，避免集合被部分删除后静默
+    使用残缺知识库。
+    """
     _validate_collection_name(collection_name)
     version_dir = INDEX_ROOT / collection_name
     record = _read_json(version_dir / "index_manifest.json")
-    if record.get("collection_name") != collection_name or record.get("state") != "ready":
+    if (not isinstance(record, dict)
+            or record.get("collection_name") != collection_name
+            or record.get("state") != "ready"):
         raise ValueError("该集合尚未完整构建，请先运行知识库入库。")
+    for key in ("chunk_count", "parent_count"):
+        if type(record.get(key)) is not int or record[key] < 1:
+            raise ValueError("该集合的版本记录不完整，请重新入库。")
+    return record
+
+
+def load_parent_documents(collection_name: str = COLLECTION_NAME) -> dict[str, Document]:
+    """读取该集合的父级快照；不读取后来可能被重新生成的 structured_v2。"""
+    record = load_index_manifest(collection_name)
+    version_dir = INDEX_ROOT / collection_name
     data = (version_dir / "parents.json").read_bytes()
     if hashlib.sha256(data).hexdigest() != record["identity"]["parents_sha256"]:
         raise ValueError("该集合的父级快照已改变，停止使用以避免引用错配。")

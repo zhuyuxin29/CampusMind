@@ -22,6 +22,7 @@ from campusmind.knowledge_base import (
     COLLECTION_NAME,
     load_parent_documents,
 )
+from campusmind.errors import ServiceError
 from campusmind.query_processing import validate_question
 
 
@@ -77,12 +78,12 @@ def rerank_documents(
             timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
         )
     except requests.exceptions.RequestException as exc:
-        raise RuntimeError(
+        raise ServiceError(
             f"重排请求失败（{type(exc).__name__}），请检查网络后重试。"
         ) from exc
 
     if not response.ok:
-        raise RuntimeError(
+        raise ServiceError(
             f"重排接口返回 HTTP {response.status_code}，"
             "请检查接口配置、账户额度和模型权限。"
         )
@@ -90,7 +91,7 @@ def rerank_documents(
     try:
         data = response.json()
     except ValueError as exc:
-        raise RuntimeError("重排接口返回的内容不是有效 JSON。") from exc
+        raise ServiceError("重排接口返回的内容不是有效 JSON。") from exc
 
     return parse_rerank_results(data, candidates)
 
@@ -184,6 +185,7 @@ def select_context(
     max_chars: int = MAX_CONTEXT_CHARS,
     parent_map: dict[str, Document] | None = None,
     collection_name: str = COLLECTION_NAME,
+    stats: dict | None = None,
 ) -> list[Document]:
     """按子片段排名扩展完整父级、按 parent_id 去重，并控制正文预算。
 
@@ -191,11 +193,17 @@ def select_context(
     覆盖父级来源。无法完整放入剩余预算的资料统一跳过（包括排名第一的超长
     父级），不截断条款或例外；发生跳过的已选资料带 context_incomplete 标记
     （表示本轮上下文有遗漏，而非单个文档被截断）。
+
+    传入 stats 字典时额外写入本轮统计：selected_count、skipped_count、
+    truncated、context_chars。即使所有父级都被跳过（返回空列表），调用方
+    也能通过 stats 区分“确实裁剪过”和“本来就没有资料”。
     """
     if type(top_n) is not int or top_n < 1:
         raise ValueError("top_n 必须大于等于 1。")
     if type(max_chars) is not int or max_chars < 1:
         raise ValueError("max_chars 必须是正整数。")
+    if stats is not None and not isinstance(stats, dict):
+        raise ValueError("stats 必须是字典。")
     if not ranked_docs:
         return []
     if parent_map is None:
@@ -207,7 +215,7 @@ def select_context(
     selected = []
     seen = set()
     total_chars = 0
-    incomplete = False
+    skipped = 0
     for child in ranked_docs:
         parent_id = child.metadata.get("parent_id")
         if not isinstance(parent_id, str) or not parent_id or parent_id not in parent_map:
@@ -223,7 +231,7 @@ def select_context(
         seen.add(parent_id)
         size = len(parent.page_content)
         if size > max_chars or total_chars + size > max_chars:
-            incomplete = True
+            skipped += 1
             logging.getLogger(__name__).warning(
                 "跳过无法完整放入剩余字数预算的父级资料：%s（%s 字，剩余 %s 字）",
                 parent_id, size, max_chars - total_chars,
@@ -245,7 +253,14 @@ def select_context(
             break
     # 只要发生过预算跳过，就标记本轮上下文不完整，便于界面和评估区分。
     for document in selected:
-        document.metadata["context_incomplete"] = incomplete
+        document.metadata["context_incomplete"] = skipped > 0
+    if stats is not None:
+        stats.update({
+            "selected_count": len(selected),
+            "skipped_count": skipped,
+            "truncated": skipped > 0,
+            "context_chars": total_chars,
+        })
     return selected
 
 

@@ -31,6 +31,9 @@ def print_result(result: dict) -> None:
         title = source.get("section_title") or "未标注章节"
         print(f"[{source['citation_id']}] {source.get('file_name', '未知来源')}｜{title}｜{pages}")
 
+    if result.get("context_incomplete"):
+        print("\n提示：本轮有部分资料因上下文长度预算未纳入，回答可能不完整。")
+
     elapsed = result.get("timings_ms", {}).get("total")
     if isinstance(elapsed, (int, float)):
         print(f"\n本轮耗时：{elapsed / 1000:.2f} 秒")

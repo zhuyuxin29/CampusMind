@@ -58,13 +58,16 @@ class ModuleTests(unittest.TestCase):
                 ret.fuse_rankings([docs], **kwargs)
 
     def test_open_index_validates_contract(self):
+        # P1-4：启动时同时校验父级快照与版本记录中的片段数量。
         parents = {"parent": parent("parent", "父级原文")}
         store = Mock()
         store.get.return_value = {
             "ids": ["child"], "documents": ["子片段"],
             "metadatas": [{"split_version": kb.SPLIT_VERSION, "parent_id": "parent"}],
         }
-        with patch.object(ret, "load_parent_documents", return_value=parents), \
+        with patch.object(ret, "load_index_manifest",
+                          return_value={"chunk_count": 1, "parent_count": 1}), \
+             patch.object(ret, "load_parent_documents", return_value=parents), \
              patch.object(ret, "open_vector_store", return_value=store), \
              patch.object(ret, "build_bm25_retriever"), \
              patch.object(ret, "build_vector_retriever"), \
@@ -73,18 +76,39 @@ class ModuleTests(unittest.TestCase):
         self.assertIs(loaded_parents, parents)
         self.assertIs(retriever, hybrid.return_value)
 
+    def test_open_index_rejects_chunk_count_mismatch(self):
+        parents = {"parent": parent("parent", "父级原文")}
+        store = Mock()
+        store.get.return_value = {
+            "ids": ["child"], "documents": ["子片段"],
+            "metadatas": [{"split_version": kb.SPLIT_VERSION, "parent_id": "parent"}],
+        }
+        with patch.object(ret, "load_index_manifest",
+                          return_value={"chunk_count": 2, "parent_count": 1}), \
+             patch.object(ret, "load_parent_documents", return_value=parents), \
+             patch.object(ret, "open_vector_store", return_value=store), \
+             patch.object(ret, "build_bm25_retriever"), \
+             patch.object(ret, "build_vector_retriever"), \
+             patch.object(ret, "HybridRetriever"):
+            with self.assertRaisesRegex(ValueError, "片段数"):
+                ret.open_index("campus_test")
+
     def test_open_index_rejects_mismatched_chunks(self):
         store = Mock()
         store.get.return_value = {
             "ids": ["child"], "documents": ["子片段"],
             "metadatas": [{"split_version": kb.SPLIT_VERSION, "parent_id": "missing"}],
         }
-        with patch.object(ret, "load_parent_documents", return_value={}), \
+        with patch.object(ret, "load_index_manifest",
+                          return_value={"chunk_count": 1, "parent_count": 0}), \
+             patch.object(ret, "load_parent_documents", return_value={}), \
              patch.object(ret, "open_vector_store", return_value=store):
             with self.assertRaisesRegex(ValueError, "父级"):
                 ret.open_index("campus_test")
         store.get.return_value = {"ids": [], "documents": [], "metadatas": []}
-        with patch.object(ret, "load_parent_documents", return_value={}), \
+        with patch.object(ret, "load_index_manifest",
+                          return_value={"chunk_count": 1, "parent_count": 0}), \
+             patch.object(ret, "load_parent_documents", return_value={}), \
              patch.object(ret, "open_vector_store", return_value=store):
             with self.assertRaisesRegex(ValueError, "为空"):
                 ret.open_index("campus_test")

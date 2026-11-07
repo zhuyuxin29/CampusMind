@@ -16,6 +16,7 @@ from langchain_core.retrievers import BaseRetriever
 from campusmind.knowledge_base import (
     COLLECTION_NAME,
     SPLIT_VERSION,
+    load_index_manifest,
     load_parent_documents,
     make_chunk_id,
     open_vector_store,
@@ -241,6 +242,7 @@ def open_index(
     在线问答服务与各调试入口共用这一入口：集合非空、记录完整，且子片段
     版本与父级快照必须一致，否则拒绝启动，避免静默使用错配的资料。
     """
+    record = load_index_manifest(collection_name)
     parents = load_parent_documents(collection_name)
     store = open_vector_store(collection_name)
     stored = store.get(include=["documents", "metadatas"])
@@ -249,6 +251,11 @@ def open_index(
     metadatas = stored.get("metadatas") or []
     if not ids or not (len(ids) == len(texts) == len(metadatas)):
         raise ValueError("知识库为空或记录不完整，请检查入库结果。")
+    if len(ids) != record["chunk_count"]:
+        raise ValueError(
+            f"知识库片段数与版本记录不一致（实际 {len(ids)}，记录 {record['chunk_count']}），"
+            "请重新入库。"
+        )
     documents = []
     for text, metadata in zip(texts, metadatas):
         if not isinstance(text, str) or not text.strip() or not isinstance(metadata, dict):

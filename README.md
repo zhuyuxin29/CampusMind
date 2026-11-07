@@ -123,6 +123,17 @@ CAMPUSMIND_COLLECTION=campus_handbook_bge_m3_v2
 .\.venv\Scripts\python.exe main.py
 ```
 
+## 常见运行问题
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 网页能打开但输入框是灰的，顶部提示缺少密钥 | 项目根目录没有 `.env`，或密钥为空 | 复制 `.env.example` 为 `.env`，填写两个密钥后重启 |
+| 终端提示“未配置 …_API_KEY，请在项目根目录 .env 中填写” | 同上 | 同上 |
+| 提示“知识库尚未就绪、内容为空或配置不匹配” | `new_data/` 里的向量库和父级快照没有随仓库提供 | 按「准备资料与建立知识库」重建，或从原机器拷贝 `new_data/chroma_db` 与 `new_data/processed/index_versions/<集合名>` |
+| `'streamlit' 不是内部或外部命令` | 没有使用项目虚拟环境 | 改用 `.\.venv\Scripts\python.exe -m streamlit run app.py` |
+| `ModuleNotFoundError: langchain_core` 等 | 用了全局 Python 而不是项目 `.venv` | 先 `.\.venv\Scripts\python.exe -m pip install -r requirements.txt`，再用 `.venv` 里的 python 运行 |
+| `git clone` 后无法直接运行 | `.env`、`new_data/`、`data/` 被 `.gitignore` 排除，仓库里只有代码 | 补 `.env`，并按上一条准备知识库；这不是代码错误 |
+
 ## 分阶段调试（CLI）
 
 不开网页即可在终端分阶段查看问答流水线的中间结果，便于定位问题出在检索、重排还是生成：
@@ -139,9 +150,11 @@ CAMPUSMIND_COLLECTION=campus_handbook_bge_m3_v2
 | `query` | 问题补全与改写后的检索查询 |
 | `retrieve` | 混合召回出的候选片段 |
 | `rerank` | 重排后的排名与最终父级上下文 |
-| `answer` | 完整回答与引用来源（调用回答模型，保存会话） |
+| `answer` | 完整回答、状态与阶段耗时（复用统一问答服务，含引用重试/降级） |
 
-`answer` 阶段可用 `clear` 清空会话，`exit` 退出。
+`answer` 阶段可用 `clear` 清空会话，`exit` 退出。`answer` 与网页、`main.py`
+共用 `QAService`：引用校验失败会重试一次，仍失败则降级为资料不足；`retrieve`、
+`rerank` 阶段只做检索与重排，不调用回答模型。
 
 ## 测试与评估
 

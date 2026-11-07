@@ -19,6 +19,17 @@ class AppTests(unittest.TestCase):
             self.assertTrue(app.chat_input[0].disabled)
             self.assertTrue(app.warning)
 
+    def test_context_incomplete_caption(self):
+        # P1-3：上下文被预算裁剪时，界面要给出提示。
+        result = {"status": "answered", "answer": "测试回答[1]", "sources": [],
+                  "context_incomplete": True}
+        with patch.object(config, "missing_api_keys", return_value=[]), \
+             patch.object(qa_service, "ask", return_value=result):
+            app = self.make_app().run()
+            app.chat_input[0].set_value("测试问题").run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any("上下文长度预算" in item.value for item in app.caption))
+
     def test_chat_sources_rerun_and_clear(self):
         def fake_ask(question, session):
             sources = [{"citation_id": 1, "file_name": "学生手册.pdf", "page_start": 2,
