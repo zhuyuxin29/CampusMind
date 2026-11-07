@@ -19,6 +19,9 @@ learning/
 logs/
 *.log
 
+# 临时调试脚本与输出
+.tmp_*
+
 # 自动生成的评估结果
 evaluation/results/*
 !evaluation/results/.gitignore

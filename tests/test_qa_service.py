@@ -58,14 +58,28 @@ class ServiceTests(unittest.TestCase):
         self.mocks["rerank_documents"].assert_not_called()
         self.mocks["generate_answer"].assert_not_called()
 
-    def test_invalid_citations_and_missing_citations_blocked(self):
-        for answer in ("错误引用[99]", "无引用的结论"):
-            self.mocks["generate_answer"].return_value = answer
-            result = self.service.ask("问题", self.session)
-            self.assertEqual(result["error_stage"], "validate_citations")
-            self.assertEqual(result["answer"], "")
-            self.assertEqual(result["sources"], [])
-        self.assertEqual(self.session.get_recent_history(), [])
+    def test_invalid_citations_degrade_to_insufficient_after_retry(self):
+        # B1：引用校验失败不再进入 error；重试一次后降级为资料不足。
+        for answer in ("错误引用[99]", "无引用的结论", "食堂有500个鸡腿[1]。"):
+            with self.subTest(answer=answer):
+                self.mocks["generate_answer"].reset_mock()
+                self.mocks["generate_answer"].return_value = answer
+                result = self.service.ask("问题", self.session)
+                self.assertEqual(result["status"], "insufficient")
+                self.assertEqual(result["insufficient_reason"], "citation_unverified")
+                self.assertEqual(result["answer"], q.make_insufficient_answer())
+                self.assertEqual(result["sources"], [])
+                self.assertIsNone(result["error_stage"])
+                self.assertEqual(self.mocks["generate_answer"].call_count, 2)
+        self.assertEqual(len(self.session.get_recent_history()), 3)
+
+    def test_citation_retry_can_recover(self):
+        self.mocks["generate_answer"].side_effect = ["错误引用[99]", "测试结论[1]。"]
+        result = self.service.ask("问题", self.session)
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(self.mocks["generate_answer"].call_count, 2)
+        self.assertEqual(len(result["sources"]), 1)
+        self.assertIsNone(result["insufficient_reason"])
 
     def test_api_failure_not_insufficient(self):
         self.mocks["generate_answer"].side_effect = RuntimeError("sensitive payload")
@@ -75,12 +89,53 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("sensitive", json.dumps(result))
         self.assertEqual(self.session.get_recent_history(), [])
 
+    def test_error_message_mapped_by_exception_type(self):
+        self.mocks["generate_answer"].side_effect = TimeoutError("timed out")
+        result = self.service.ask("问题", self.session)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("超时", result["message"])
+        self.mocks["generate_answer"].side_effect = ConnectionError("offline")
+        result = self.service.ask("问题", self.session)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("网络", result["message"])
+
     def test_model_insufficient(self):
         self.mocks["generate_answer"].return_value = q.make_insufficient_answer()
         result = self.service.ask("问题", self.session)
         self.assertEqual(result["status"], "insufficient")
+        self.assertEqual(result["insufficient_reason"], "model_declined")
         self.assertTrue(result["saved"])
         self.assertIsNone(result["timings_ms"]["validate_citations"])
+
+    def test_insufficient_detection_tolerates_noise(self):
+        # B1：固定句子带前后缀、空白或 Markdown 装饰时仍按资料不足处理。
+        self.mocks["generate_answer"].return_value = (
+            " 抱歉，\n当前资料不足以回答这个问题，请补充具体事项或相关资料。 \n"
+        )
+        result = self.service.ask("问题", self.session)
+        self.assertEqual(result["status"], "insufficient")
+        self.assertEqual(result["answer"], q.make_insufficient_answer())
+        self.assertIsNone(result["error_stage"])
+
+    def test_punctuation_only_input_is_invalid(self):
+        # B2：纯标点或 emoji 是输入问题，不能误报为网络/密钥故障。
+        for question in ("？？？", "！！！", "😀😀😀", "。。。", "  !?  "):
+            with self.subTest(question=question):
+                result = self.service.ask(question, self.session)
+                self.assertEqual(result["status"], "invalid_input")
+                self.assertEqual(result["error_stage"], "validate")
+        self.resource.assert_not_called()
+
+    def test_context_incomplete_flagged(self):
+        # B3：父级预算跳过时，结果带 context_incomplete 标记。
+        self.mocks["select_context"].return_value = [Document(
+            page_content="测试原文",
+            metadata={"file_name": "手册.pdf", "page_start": 2, "page_end": 4,
+                      "context_incomplete": True},
+        )]
+        result = self.service.ask("问题", self.session)
+        self.assertEqual(result["status"], "answered")
+        self.assertTrue(result["context_incomplete"])
 
     def test_history_and_session_isolation(self):
         self.session.add_turn("旧问题", "旧回答")
@@ -99,22 +154,23 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["error_stage"], "save_session")
 
     def test_initialization_cached_and_failure_retryable(self):
+        # B5：服务与调试入口共用 open_index，失败后不缓存，下次可重试。
         service = q.QAService()
-        store = Mock()
-        store.get.return_value = {"ids": ["child"], "documents": ["原文"], "metadatas": [
-            {"split_version": q.SPLIT_VERSION, "parent_id": "parent"}]}
-        with patch.object(q, "load_parent_documents", return_value={"parent": self.doc}) as load, \
-             patch.object(q, "open_vector_store", return_value=store), \
-             patch.object(q, "build_bm25_retriever"), patch.object(q, "build_vector_retriever"), \
-             patch.object(q, "HybridRetriever"):
-            store.get.side_effect = RuntimeError("temporary")
+        calls = []
+
+        def fake_open(collection_name):
+            calls.append(collection_name)
+            if len(calls) == 1:
+                raise RuntimeError("temporary")
+            return Mock(), {"parent": self.doc}
+
+        with patch.object(q, "open_index", side_effect=fake_open):
             with self.assertRaises(RuntimeError):
                 service._get_resources()
             self.assertIsNone(service._resources)
-            store.get.side_effect = None
             first = service._get_resources()
             self.assertIs(first, service._get_resources())
-            self.assertEqual(load.call_count, 2)
+            self.assertEqual(len(calls), 2)
 
 
     def test_session_from_previous_module_load_keeps_history(self):

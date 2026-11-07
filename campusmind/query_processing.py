@@ -1,5 +1,4 @@
 from config import (
-    PROJECT_DIR,
     MAX_QUESTION_CHARS,
     MAX_QUERIES,
     DEEPSEEK_MODEL,
@@ -7,7 +6,6 @@ from config import (
     REQUEST_TIMEOUT,
     LLM_MAX_RETRIES,
     QUERY_MAX_TOKENS,
-    HISTORY_ROUNDS,
     get_api_key,
 )
 
@@ -15,12 +13,9 @@ import json
 import logging
 import re
 from functools import lru_cache
-from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-
-from campusmind.session_manager import ChatSession
 
 
 logger = logging.getLogger(__name__)
@@ -35,19 +30,46 @@ SCHOLARSHIP_CLARIFICATION = (
     "你想咨询哪一种奖学金：国家奖学金、国家励志奖学金、英才奖学金，"
     "还是湘信励志奖学金？也可以说明其他奖学金名称，或明确要比较各类奖学金。"
 )
+# 可能同时指国家励志或湘信励志，用户只写“励志奖学金”时仍需澄清。
+SCHOLARSHIP_AMBIGUOUS_ALIASES = ("励志奖学金",)
+SCHOLARSHIP_ACTION_WORDS = (
+    "申请", "申报", "条件", "材料", "流程", "评选", "评审", "资格", "要求",
+    "金额", "多少钱", "时间", "截止", "名额", "成绩", "挂科", "发放",
+)
+# “奖学金”前面是这些词时仍算裸词，不是具体奖学金名称。
+BARE_SCHOLARSHIP_PREFIXES = (
+    "申请", "申报", "获得", "领取", "评选", "评定", "咨询", "了解", "请问",
+    "关于", "有关", "各类", "各种", "各项", "哪些", "所有", "全部",
+    "这个", "那个", "这些", "那些", "不同", "相关", "学校", "我校",
+    "的", "是", "和", "与", "或", "及", "在", "对", "了", "有",
+)
+
+
+def _mentions_bare_scholarship(text: str) -> bool:
+    """判断“奖学金”是否没有被校级、企业等具体名称限定。"""
+    for match in re.finditer("奖学金", text):
+        prefix = text[max(0, match.start() - 6):match.start()]
+        if not prefix or not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", prefix[-1]):
+            return True
+        if any(prefix.endswith(word) for word in BARE_SCHOLARSHIP_PREFIXES):
+            return True
+    return False
 
 
 def needs_scholarship_clarification(question: str) -> bool:
-    """兜底识别未指定类别的办理问题；分类介绍和明确比较不强制澄清。"""
+    """兜底识别未指定类别的办理问题；明确命名、分类介绍和比较不强制澄清。"""
     text = "".join(question.split())
     if "奖学金" not in text or any(name in text for name in SCHOLARSHIP_TYPES):
         return False
-    if re.search(r"(?:有|包括)哪些奖学金|奖学金(?:都)?有哪些[？?。！!]*$|哪几种|种类|类型|类别|区别|比较|对比|分别|各类|所有|全部", text):
+    if re.search(r"(?:有|包括)哪些奖学金|奖学金(?:都)?有哪些[？?。！!]*$|哪几种|种类|类型|类别|区别|比较|对比|分别|各类|所有|全部|各项", text):
         return False
-    return any(word in text for word in (
-        "申请", "申报", "条件", "材料", "流程", "评选", "评审", "资格", "要求",
-        "金额", "多少钱", "时间", "截止", "名额", "成绩", "挂科", "发放",
-    ))
+    # “励志奖学金”可能指国家励志或湘信励志，保留澄清。
+    if any(alias in text for alias in SCHOLARSHIP_AMBIGUOUS_ALIASES):
+        return True
+    # 只有裸“奖学金”才澄清；校级、企业等命名奖学金放行给检索。
+    if not _mentions_bare_scholarship(text):
+        return False
+    return any(word in text for word in SCHOLARSHIP_ACTION_WORDS)
 
 
 @lru_cache(maxsize=1)
@@ -93,7 +115,7 @@ def _request_json(system_prompt: str, payload: dict) -> dict:
 
 
 def validate_question(question: str) -> str:
-    """检查问题类型、空白和长度，返回去掉首尾空白的问题。"""
+    """检查问题类型、空白、可检索文字和长度，返回去掉首尾空白的问题。"""
     if not isinstance(question, str):
         raise ValueError("问题必须是字符串。")
 
@@ -101,6 +123,10 @@ def validate_question(question: str) -> str:
 
     if not question:
         raise ValueError("问题不能为空。")
+
+    # 纯标点或 emoji 无法检索，提前按输入错误处理，不进入模型或检索流程。
+    if not any(char.isalnum() for char in question):
+        raise ValueError("问题中没有可检索的文字，请描述具体的校园规定问题。")
 
     if len(question) > MAX_QUESTION_CHARS:
         raise ValueError(
@@ -311,60 +337,10 @@ def normalize_queries(
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.WARNING)
+    """调试入口：见 campusmind.cli（--stage query）。"""
+    from campusmind.cli import run
 
-    # 演示历史，仅用于测试指代补全，不是实际知识库回答
-    session = ChatSession(history_rounds=HISTORY_ROUNDS)
-    session.add_turn(
-        question="我想申请缓考。",
-        answer="你想了解缓考的哪方面？",
-    )
-
-    print("===== 查询处理测试 =====")
-    print("演示历史：")
-    print("用户：我想申请缓考。")
-    print("助手：你想了解缓考的哪方面？")
-    print("\n可以输入：需要什么材料？")
-    print("也可以输入新话题，检查是否错误带入旧话题。\n")
-
-    question = input("请输入问题：")
-
-    try:
-        # 1. 检查输入
-        question = validate_question(question)
-
-        # 2. 获取历史并补全问题
-        history = session.get_recent_history()
-        standalone_question = contextualize_question(
-            question,
-            history,
-        )
-
-        # 3. 改写查询
-        rewrites = rewrite_queries(standalone_question)
-
-        # 4. 去重并限制数量，始终保留完整原问题
-        queries = normalize_queries(
-            standalone_question,
-            rewrites,
-        )
-
-    except ClarificationNeeded as exc:
-        print(f"\n需要补充信息：{exc}")
-        return
-    except (ValueError, RuntimeError) as exc:
-        print(f"\n处理未完成：{exc}")
-        return
-
-    print("\n===== 查询处理结果 =====")
-    print(f"用户原问题：{question}")
-    print(f"补全后的问题：{standalone_question}")
-
-    print("\n准备交给检索器的查询：")
-    for index, query in enumerate(queries, start=1):
-        print(f"{index}. {query}")
-
-    # 此处没有生成最终回答，因此不调用 session.add_turn()
+    run("query")
 
 
 if __name__ == "__main__":

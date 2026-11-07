@@ -70,6 +70,56 @@ class GenerationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 g.generate_answer(["问题"])
 
+    def test_is_insufficient_answer_tolerates_noise(self):
+        # B1：固定“资料不足”句子允许空白、标点、Markdown 和前后缀。
+        base = g.make_insufficient_answer()
+        for answer in (base, f" {base} ", f"抱歉，{base}", f"**{base}**\n",
+                       "当前资料不足以回答这个问题"):
+            self.assertTrue(g.is_insufficient_answer(answer), answer)
+        for answer in ("资料不足", "当前资料不足以回答这道题。", "可以申请[1]。", ""):
+            self.assertFalse(g.is_insufficient_answer(answer), answer)
+        with self.assertRaises(ValueError):
+            g.is_insufficient_answer(None)
+
+    def test_citation_support_ignores_citation_digits(self):
+        sources = {1: {"content": "示例规定：须满足甲条件，乙情况除外。"}}
+        # 引用编号 [1] 里的数字不能当成正文数字，否则会误判缺少依据。
+        self.assertTrue(g.citation_support("示例结论[1]。", sources)["supported"])
+        self.assertFalse(g.citation_support("食堂有500个鸡腿[1]。", sources)["supported"])
+        self.assertFalse(g.citation_support("完全无关的结论[1]。", sources)["supported"])
+
+    def test_select_cited_sources(self):
+        sources = {1: {"content": "示例规定：须满足甲条件，乙情况除外。"}}
+        selected = g.select_cited_sources("示例结论[1]。", sources)
+        self.assertEqual(len(selected), 1)
+        selected[0]["content"] = "被修改"
+        self.assertIn("示例规定", sources[1]["content"])
+        for answer in ("错误[9]", "无引用", "错误[1,2]", "无关结论[1]。"):
+            with self.subTest(answer=answer):
+                with self.assertRaises(g.CitationCheckFailed):
+                    g.select_cited_sources(answer, sources)
+
+    def test_generate_with_citation_retry(self):
+        sources = {1: {"content": "示例规定：须满足甲条件，乙情况除外。"}}
+        with patch.object(g, "generate_answer",
+                          side_effect=["错误[99]", "示例结论[1]。"]) as generate:
+            answer, selected = g.generate_answer_with_citation_retry(["问题"], sources)
+        self.assertEqual(answer, "示例结论[1]。")
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(generate.call_count, 2)
+        with patch.object(g, "generate_answer", return_value="错误[99]") as generate:
+            answer, selected = g.generate_answer_with_citation_retry(["问题"], sources, attempts=2)
+        self.assertEqual(answer, g.make_insufficient_answer())
+        self.assertEqual(selected, [])
+        self.assertEqual(generate.call_count, 2)
+        with patch.object(g, "generate_answer",
+                          return_value=g.make_insufficient_answer()) as generate:
+            answer, selected = g.generate_answer_with_citation_retry(["问题"], sources, attempts=1)
+        self.assertEqual(answer, g.make_insufficient_answer())
+        self.assertEqual(generate.call_count, 1)
+        with self.assertRaises(ValueError):
+            g.generate_answer_with_citation_retry(["问题"], sources, attempts=0)
+
 
 if __name__ == "__main__":
     unittest.main()

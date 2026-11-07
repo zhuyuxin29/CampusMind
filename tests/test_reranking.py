@@ -42,9 +42,57 @@ class ModuleTests(unittest.TestCase):
         self.assertEqual([d.metadata["parent_id"] for d in result], ["a", "c"])
         self.assertEqual(sum(len(d.page_content) for d in result), 9)
 
-    def test_oversized_first_parent(self):
-        with self.assertRaisesRegex(ValueError, "超过"):
-            r.select_context([child("a")], max_chars=2, parent_map={"a": parent("a", "123")})
+    def test_oversized_parent_skipped_and_flagged(self):
+        # B3：排名第一的父级超长也统一跳过，不再让整题失败。
+        parents = {"a": parent("a", "123456"), "b": parent("b", "12")}
+        result = r.select_context([child("a"), child("b")], max_chars=3, parent_map=parents)
+        self.assertEqual([d.metadata["parent_id"] for d in result], ["b"])
+        self.assertTrue(all(d.metadata["context_incomplete"] for d in result))
+
+    def test_all_parents_oversized_returns_empty(self):
+        result = r.select_context([child("a")], max_chars=2, parent_map={"a": parent("a", "123")})
+        self.assertEqual(result, [])
+
+    def test_no_truncation_flag_when_everything_fits(self):
+        parents = {"a": parent("a", "1234")}
+        result = r.select_context([child("a")], max_chars=10, parent_map=parents)
+        self.assertFalse(result[0].metadata["context_incomplete"])
+
+    def test_parse_rerank_results_maps_and_sorts(self):
+        candidates = [
+            Document(page_content="甲", metadata={"chunk_id": "a"}),
+            Document(page_content="乙", metadata={"chunk_id": "b"}),
+        ]
+        response = {"results": [
+            {"index": 1, "relevance_score": 0.9},
+            {"index": 0, "relevance_score": 0.5},
+        ]}
+        ranked = r.parse_rerank_results(response, candidates)
+        self.assertEqual([d.metadata["chunk_id"] for d in ranked], ["b", "a"])
+        self.assertEqual([d.metadata["rerank_rank"] for d in ranked], [1, 2])
+        self.assertEqual(ranked[0].metadata["rerank_input_index"], 1)
+        self.assertEqual(candidates[0].metadata, {"chunk_id": "a"})
+
+    def test_parse_rerank_results_rejects_invalid(self):
+        candidates = [Document(page_content="甲"), Document(page_content="乙")]
+        invalid_responses = (
+            [],
+            {},
+            {"results": "bad"},
+            {"results": [{"index": 0, "relevance_score": 0.5}]},  # 数量不完整
+            {"results": [{"index": 0, "relevance_score": 0.5},
+                         {"index": 0, "relevance_score": 0.4}]},  # 重复 index
+            {"results": [{"index": 2, "relevance_score": 0.5},
+                         {"index": 0, "relevance_score": 0.4}]},  # 越界
+            {"results": [{"index": 0, "relevance_score": True},
+                         {"index": 1, "relevance_score": 0.4}]},  # 布尔分数
+            {"results": [{"index": 0, "relevance_score": float("nan")},
+                         {"index": 1, "relevance_score": 0.4}]},  # NaN
+        )
+        for response in invalid_responses:
+            with self.subTest(response=response):
+                with self.assertRaises(ValueError):
+                    r.parse_rerank_results(response, candidates)
 
     def test_missing_mismatched_parent(self):
         with self.assertRaises(ValueError):

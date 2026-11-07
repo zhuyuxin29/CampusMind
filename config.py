@@ -42,6 +42,10 @@ EMBEDDING_MAX_RETRIES = 2
 RERANK_MAX_RETRIES = 1
 QUERY_MAX_TOKENS = 1000
 ANSWER_MAX_TOKENS = 2000
+# 引用校验失败时最多生成几次；一次正常生成 + 一次带纠正提示的重试。
+ANSWER_ATTEMPTS = 2
+# 引用句与原文去掉引用编号后的字符二元组最小重叠比例。
+CITATION_SUPPORT_MIN_OVERLAP = 0.15
 
 
 def get_api_key(name: str) -> str:

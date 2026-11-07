@@ -1,12 +1,13 @@
 """回答生成：在项目根目录运行 python -m campusmind.generation。"""
 
 from config import (
-    PROJECT_DIR,
     DEEPSEEK_MODEL,
     DEEPSEEK_BASE_URL,
     REQUEST_TIMEOUT,
     LLM_MAX_RETRIES,
     ANSWER_MAX_TOKENS,
+    ANSWER_ATTEMPTS,
+    CITATION_SUPPORT_MIN_OVERLAP,
     HISTORY_ROUNDS,
     get_api_key,
 )
@@ -15,7 +16,6 @@ import json
 import re
 from copy import deepcopy
 from functools import lru_cache
-from pathlib import Path
 
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -25,6 +25,22 @@ from campusmind.query_processing import validate_question
 
 
 CITATION_PATTERN = re.compile(r"\[([0-9]+)\]")
+# 用于识别“资料不足”固定回答时忽略空白、标点和 Markdown 装饰。
+ANSWER_NOISE_PATTERN = re.compile(
+    r"[\s\u3000，。；：、！？,.;:!?（）()\[\]【】《》\"'“”‘’*#>「」]"
+)
+INSUFFICIENT_CORE = "当前资料不足以回答这个问题"
+CITATION_RETRY_HINT = (
+    "上一轮回答未通过引用校验：每个有依据的结论必须使用本轮提供的编号"
+    "（如 [1]），且引用内容要能支持该结论；资料不足时只回复固定的资料不足原句。"
+    "请重新作答。"
+)
+
+
+class CitationCheckFailed(ValueError):
+    """回答的引用编号或语义支持不满足要求，需要重试或降级为资料不足。"""
+
+
 SYSTEM_PROMPT = """
 你是 CampusMind 的校园规章制度问答助手，名字叫“团团”，使用中文回答。
 语气亲切、轻快，像热心的校园小伙伴。可以自然称呼“同学”、偶尔使用“呀”“～”或一个表情，但不要每段重复卖萌或自我介绍。
@@ -154,6 +170,103 @@ def validate_citations(answer: str, source_map: dict[int, dict]) -> dict:
     }
 
 
+def _normalize_for_match(text: str) -> str:
+    return ANSWER_NOISE_PATTERN.sub("", text).lower()
+
+
+def _bigrams(text: str) -> set[str]:
+    return {text[index:index + 2] for index in range(len(text) - 1)}
+
+
+def is_insufficient_answer(answer: str) -> bool:
+    """规范化后判断是否为固定“资料不足”回答，容忍空白、标点和语气前后缀。"""
+    if not isinstance(answer, str):
+        raise ValueError("answer 必须是字符串。")
+    return INSUFFICIENT_CORE in _normalize_for_match(answer)
+
+
+def citation_support(answer: str, source_map: dict[int, dict]) -> dict:
+    """检查每个带引用句子与引用原文是否有词面/数字重叠。
+
+    只做可解释的轻量校验：先去掉引用编号本身，句子含数字时引用原文必须
+    出现同一数字；否则要求字符二元组达到最小重叠比例。用于拦截“引用编号
+    存在但内容无关”，不判断回答是否正确。
+    """
+    if not isinstance(answer, str):
+        raise ValueError("answer 必须是字符串。")
+
+    unsupported: list[str] = []
+    for sentence in re.split(r"(?<=[。！？!?])|\n+", answer):
+        cited = sorted({int(v) for v in CITATION_PATTERN.findall(sentence)})
+        if not cited:
+            continue
+        evidence = " ".join(
+            source_map[number]["content"]
+            for number in cited
+            if number in source_map
+        )
+        # 引用编号自身的数字不能参与数字一致性检查。
+        sentence_norm = _normalize_for_match(CITATION_PATTERN.sub("", sentence))
+        evidence_norm = _normalize_for_match(evidence)
+        if not sentence_norm or not evidence_norm:
+            unsupported.append(sentence.strip())
+            continue
+        numbers = re.findall(r"\d+(?:\.\d+)?", sentence_norm)
+        if numbers and not all(number in evidence_norm for number in numbers):
+            unsupported.append(sentence.strip())
+            continue
+        sentence_bigrams = _bigrams(sentence_norm)
+        evidence_bigrams = _bigrams(evidence_norm)
+        if not sentence_bigrams:
+            continue
+        overlap = sentence_bigrams & evidence_bigrams
+        if len(overlap) / len(sentence_bigrams) < CITATION_SUPPORT_MIN_OVERLAP:
+            unsupported.append(sentence.strip())
+
+    return {
+        "supported": not unsupported,
+        "unsupported_sentences": unsupported[:5],
+    }
+
+
+def select_cited_sources(answer: str, source_map: dict[int, dict]) -> list[dict]:
+    """返回通过编号与语义校验的来源；不合格时抛出 CitationCheckFailed。"""
+    check = validate_citations(answer, source_map)
+    if not check["valid"] or not check["has_citations"]:
+        raise CitationCheckFailed("回答引用编号无效、格式不正确或缺少引用。")
+    support = citation_support(answer, source_map)
+    if not support["supported"]:
+        raise CitationCheckFailed("回答存在引用内容无法支持的结论。")
+    return [deepcopy(source_map[number]) for number in check["cited_ids"]]
+
+
+def build_citation_retry_messages(messages: list) -> list:
+    """在原始提示后追加引用纠正提示，用于重试一次。"""
+    from langchain_core.messages import HumanMessage
+
+    return [*messages, HumanMessage(content=CITATION_RETRY_HINT)]
+
+
+def generate_answer_with_citation_retry(
+    messages: list,
+    source_map: dict[int, dict],
+    attempts: int = ANSWER_ATTEMPTS,
+) -> tuple[str, list[dict]]:
+    """生成回答并校验引用；不合格时带纠正提示重试，仍失败则降级为资料不足。"""
+    if attempts < 1:
+        raise ValueError("attempts 必须大于等于 1。")
+    for attempt in range(attempts):
+        prompt = messages if attempt == 0 else build_citation_retry_messages(messages)
+        answer = generate_answer(prompt)
+        if is_insufficient_answer(answer):
+            return make_insufficient_answer(), []
+        try:
+            return answer, select_cited_sources(answer, source_map)
+        except CitationCheckFailed:
+            continue
+    return make_insufficient_answer(), []
+
+
 def make_insufficient_answer() -> str:
     return "当前资料不足以回答这个问题，请补充具体事项或相关资料。"
 
@@ -165,67 +278,21 @@ def answer_question(question: str, documents: list[Document], history: list[dict
     if not source_map:
         return {"answer": make_insufficient_answer(), "sources": [], "status": "insufficient"}
     answer = generate_answer(build_messages(question, context, history))
-    if answer == make_insufficient_answer():
-        return {"answer": answer, "sources": [], "status": "insufficient"}
-    check = validate_citations(answer, source_map)
-    if not check["valid"] or not check["has_citations"]:
+    if is_insufficient_answer(answer):
+        return {"answer": make_insufficient_answer(), "sources": [], "status": "insufficient"}
+    try:
+        sources = select_cited_sources(answer, source_map)
+    except CitationCheckFailed as exc:
         # 不删除错误编号后展示原回答，也不把校验失败写进聊天历史。
-        raise RuntimeError("回答引用校验未通过（编号不存在、格式不正确或缺少引用），请重试。")
-    return {
-        "answer": answer,
-        "sources": [deepcopy(source_map[number]) for number in check["cited_ids"]],
-        "status": "answered",
-    }
+        raise RuntimeError("回答引用校验未通过（编号不存在、格式不正确或内容不支持），请重试。") from exc
+    return {"answer": answer, "sources": sources, "status": "answered"}
 
 
 def main() -> None:
-    """复用已有检索、重排和会话模块，启动时只建立一次检索器。"""
-    import logging
-    import jieba
-    from campusmind.knowledge_base import COLLECTION_NAME
-    from campusmind.query_processing import ClarificationNeeded, contextualize_question, normalize_queries, rewrite_queries
-    from campusmind.reranking import rerank_documents, select_context
-    from campusmind.retrieval import build_hybrid_retriever, retrieve_candidates
-    from campusmind.session_manager import ChatSession
+    """调试入口：见 campusmind.cli（--stage answer）。"""
+    from campusmind.cli import run
 
-    logging.basicConfig(level=logging.WARNING)
-    jieba.setLogLevel(logging.WARNING)
-    retriever = build_hybrid_retriever(COLLECTION_NAME)
-    session = ChatSession(history_rounds=HISTORY_ROUNDS)
-    print("===== CampusMind 问答 =====\n输入 exit 退出，clear 清空会话。")
-    while True:
-        try:
-            question = input("\n请输入问题：").strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-        if question.lower() in {"exit", "quit"}:
-            break
-        if question.lower() == "clear":
-            session.clear()
-            print("会话已清空。")
-            continue
-        try:
-            question = validate_question(question)
-            history = session.get_recent_history()
-            standalone = contextualize_question(question, history)
-            queries = normalize_queries(standalone, rewrite_queries(standalone))
-            candidates = retrieve_candidates(queries=queries, retriever=retriever)
-            context_docs = select_context(rerank_documents(standalone, candidates)) if candidates else []
-            result = answer_question(standalone, context_docs, history)
-        except ClarificationNeeded as exc:
-            print(f"需要补充信息：{exc}")
-            continue
-        except (ValueError, RuntimeError) as exc:
-            print(f"处理未完成：{exc}")
-            continue
-        print(f"\n{result['answer']}")
-        if result["sources"]:
-            print("\n参考来源（PDF 页码）：")
-        for source in result["sources"]:
-            start, end = source["page_start"], source["page_end"]
-            pages = "未知" if start is None else str(start) if end == start else f"{start}–{end}"
-            print(f"[{source['citation_id']}] {source['file_name']}，第 {pages} 页")
-        session.add_turn(question, result["answer"], result["sources"])
+    run("answer")
 
 
 if __name__ == "__main__":

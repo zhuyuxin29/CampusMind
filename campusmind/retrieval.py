@@ -4,7 +4,6 @@ from config import (
     RRF_CONSTANT,
 )
 
-import logging
 from collections import defaultdict
 
 import jieba
@@ -17,14 +16,12 @@ from langchain_core.retrievers import BaseRetriever
 from campusmind.knowledge_base import (
     COLLECTION_NAME,
     SPLIT_VERSION,
+    load_parent_documents,
     make_chunk_id,
     open_vector_store,
 )
 from campusmind.query_processing import (
-    ClarificationNeeded,
-    contextualize_question,
     normalize_queries,
-    rewrite_queries,
     validate_question,
 )
 
@@ -234,15 +231,17 @@ def retrieve_candidates(
     )
 
 
-def build_hybrid_retriever(
+def open_index(
     collection_name: str = COLLECTION_NAME,
     *,
     top_k: int = CANDIDATE_K,
-) -> HybridRetriever:
-    """打开集合、读取子片段并建立 BM25 + 向量混合检索器。
+) -> tuple[HybridRetriever, dict[str, Document]]:
+    """打开集合并校验索引契约，返回混合检索器和父级快照。
 
-    供在线问答服务与各调试入口复用；校验知识库非空、记录完整且文字与元数据有效。
+    在线问答服务与各调试入口共用这一入口：集合非空、记录完整，且子片段
+    版本与父级快照必须一致，否则拒绝启动，避免静默使用错配的资料。
     """
+    parents = load_parent_documents(collection_name)
     store = open_vector_store(collection_name)
     stored = store.get(include=["documents", "metadatas"])
     ids = stored.get("ids") or []
@@ -254,14 +253,27 @@ def build_hybrid_retriever(
     for text, metadata in zip(texts, metadatas):
         if not isinstance(text, str) or not text.strip() or not isinstance(metadata, dict):
             raise ValueError("知识库包含无效文字或元数据。")
+        if metadata.get("split_version") != SPLIT_VERSION or metadata.get("parent_id") not in parents:
+            raise ValueError("子片段与当前集合的父级快照不匹配。")
         documents.append(Document(page_content=text, metadata=metadata))
     if not documents:
         raise ValueError("知识库中没有有效文字。")
-    return HybridRetriever(
+    retriever = HybridRetriever(
         bm25_retriever=build_bm25_retriever(documents),
         vector_retriever=build_vector_retriever(store, k=min(RECALL_K, len(documents))),
         top_k=top_k,
     )
+    return retriever, parents
+
+
+def build_hybrid_retriever(
+    collection_name: str = COLLECTION_NAME,
+    *,
+    top_k: int = CANDIDATE_K,
+) -> HybridRetriever:
+    """调试入口：只返回混合检索器，启动约束与在线服务完全一致。"""
+    retriever, _ = open_index(collection_name, top_k=top_k)
+    return retriever
 
 
 def format_document_source(doc: Document) -> str:
@@ -277,66 +289,10 @@ def format_document_source(doc: Document) -> str:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.WARNING)
-    jieba.setLogLevel(logging.WARNING)
+    """调试入口：见 campusmind.cli（--stage retrieve）。"""
+    from campusmind.cli import run
 
-    # 启动时建立一次混合检索器，后续提问复用。
-    retriever = build_hybrid_retriever(COLLECTION_NAME)
-
-    print(f"集合：{COLLECTION_NAME}；混合检索器已就绪")
-    print("输入完整问题开始检索，输入 exit 退出。")
-    print("当前是检索测试，不保存多轮对话，也不生成回答。")
-
-    # 多次提问复用同一检索器，不重复建立 BM25
-    while True:
-        question = input("\n请输入问题：").strip()
-
-        if question.lower() in {"exit", "quit"}:
-            break
-
-        try:
-            # 3. 接入查询处理模块
-            question = validate_question(question)
-
-            # 本测试没有真实问答历史，传入空列表
-            standalone_question = contextualize_question(
-                question,
-                history=[],
-            )
-
-            rewrites = rewrite_queries(standalone_question)
-            queries = normalize_queries(
-                standalone_question,
-                rewrites,
-            )
-
-        except ClarificationNeeded as exc:
-            print(f"需要补充信息：{exc}")
-            continue
-        except (ValueError, RuntimeError) as exc:
-            print(f"查询处理未完成：{exc}")
-            continue
-
-        print("\n===== 实际检索查询 =====")
-        for index, query in enumerate(queries, start=1):
-            print(f"{index}. {query}")
-
-        # 4. 多查询混合召回
-        candidates = retrieve_candidates(
-            queries=queries,
-            retriever=retriever,
-        )
-
-        print(
-            f"\n===== 混合召回结果：{len(candidates)} 个候选 ====="
-        )
-
-        for index, doc in enumerate(candidates, start=1):
-            print(f"\n--- 第 {index} 条 ---")
-            print(f"片段 ID：{doc.metadata['chunk_id']}")
-            print(f"RRF 分数：{doc.metadata['rrf_score']:.6f}")
-            print(f"来源：{format_document_source(doc)}")
-            print(doc.page_content)
+    run("retrieve")
 
 
 if __name__ == "__main__":

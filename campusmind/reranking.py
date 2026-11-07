@@ -1,5 +1,4 @@
 from config import (
-    PROJECT_DIR,
     RERANK_URL,
     RERANK_MODEL,
     CONTEXT_TOP_N,
@@ -13,9 +12,7 @@ from config import (
 import logging
 import math
 from copy import deepcopy
-from pathlib import Path
 
-import jieba
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -25,18 +22,7 @@ from campusmind.knowledge_base import (
     COLLECTION_NAME,
     load_parent_documents,
 )
-from campusmind.query_processing import (
-    ClarificationNeeded,
-    contextualize_question,
-    normalize_queries,
-    rewrite_queries,
-    validate_question,
-)
-from campusmind.retrieval import (
-    build_hybrid_retriever,
-    retrieve_candidates,
-    format_document_source,
-)
+from campusmind.query_processing import validate_question
 
 
 # 最多选取三份不同父级资料；正文总字数上限，不包含提示词和历史。
@@ -202,7 +188,9 @@ def select_context(
     """按子片段排名扩展完整父级、按 parent_id 去重，并控制正文预算。
 
     父级来自当前集合的版本快照。保留父级原文和页码，不用子片段元数据
-    覆盖父级来源；不能放入剩余预算的资料跳过，不截断条款或例外。
+    覆盖父级来源。无法完整放入剩余预算的资料统一跳过（包括排名第一的超长
+    父级），不截断条款或例外；发生跳过的已选资料带 context_incomplete 标记
+    （表示本轮上下文有遗漏，而非单个文档被截断）。
     """
     if type(top_n) is not int or top_n < 1:
         raise ValueError("top_n 必须大于等于 1。")
@@ -219,6 +207,7 @@ def select_context(
     selected = []
     seen = set()
     total_chars = 0
+    incomplete = False
     for child in ranked_docs:
         parent_id = child.metadata.get("parent_id")
         if not isinstance(parent_id, str) or not parent_id or parent_id not in parent_map:
@@ -233,10 +222,12 @@ def select_context(
                 raise ValueError(f"父子资料的 {key} 不一致，请检查索引版本。")
         seen.add(parent_id)
         size = len(parent.page_content)
-        if size > max_chars and not selected:
-            raise ValueError(f"最高排名父级资料有 {size} 字，超过 {max_chars} 字预算，请调大 max_chars。")
-        if total_chars + size > max_chars:
-            logging.getLogger(__name__).warning("跳过无法完整放入剩余字数预算的父级资料：%s", parent_id)
+        if size > max_chars or total_chars + size > max_chars:
+            incomplete = True
+            logging.getLogger(__name__).warning(
+                "跳过无法完整放入剩余字数预算的父级资料：%s（%s 字，剩余 %s 字）",
+                parent_id, size, max_chars - total_chars,
+            )
             continue
         metadata = deepcopy(parent.metadata)
         # 重排分数属于命中的子片段，作为父级优先级；来源字段仍属于父级。
@@ -252,105 +243,17 @@ def select_context(
         total_chars += size
         if len(selected) == top_n:
             break
+    # 只要发生过预算跳过，就标记本轮上下文不完整，便于界面和评估区分。
+    for document in selected:
+        document.metadata["context_incomplete"] = incomplete
     return selected
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.WARNING)
-    jieba.setLogLevel(logging.WARNING)
+    """调试入口：见 campusmind.cli（--stage rerank）。"""
+    from campusmind.cli import run
 
-    # 启动时创建一次混合检索器，后续提问复用
-    retriever = build_hybrid_retriever(COLLECTION_NAME)
-
-    print("===== 混合召回＋重排测试 =====")
-    print(f"集合：{COLLECTION_NAME}；父级最多 {CONTEXT_TOP_N} 份，正文预算 {MAX_CONTEXT_CHARS} 字")
-    print("请输入完整问题，输入 exit 退出。")
-    print("当前测试不保存多轮对话，也不生成最终回答。")
-
-    while True:
-        question = input("\n请输入问题：").strip()
-
-        if question.lower() in {"exit", "quit"}:
-            break
-
-        try:
-            # 2. 查询处理
-            question = validate_question(question)
-
-            standalone_question = contextualize_question(
-                question,
-                history=[],
-            )
-
-            rewrites = rewrite_queries(standalone_question)
-            queries = normalize_queries(
-                standalone_question,
-                rewrites,
-            )
-
-            print("\n===== 实际检索查询 =====")
-            print(f"完整问题：{standalone_question}")
-
-            for index, query in enumerate(queries, start=1):
-                print(f"{index}. {query}")
-
-            # 3. 多查询混合召回
-            candidates = retrieve_candidates(
-                queries=queries,
-                retriever=retriever,
-            )
-
-            if not candidates:
-                print("没有召回候选片段。")
-                continue
-
-            # 4. 使用完整问题进行重排
-            print(
-                f"\n正在对 {len(candidates)} 个候选片段重排……",
-                flush=True,
-            )
-
-            ranked_docs = rerank_documents(
-                question=standalone_question,
-                candidates=candidates,
-            )
-
-            # 5. 选择后续回答使用的资料
-            context_docs = select_context(
-                ranked_docs,
-                top_n=CONTEXT_TOP_N,
-            )
-
-        except ClarificationNeeded as exc:
-            print(f"需要补充信息：{exc}")
-            continue
-        except (ValueError, RuntimeError) as exc:
-            print(f"处理未完成：{exc}")
-            continue
-
-        # 查看全部候选的排名变化和分数分布
-        print("\n===== 全部候选的重排分数 =====")
-
-        for doc in ranked_docs:
-            original_rank = doc.metadata["rerank_input_index"] + 1
-
-            print(
-                f"原排名 {original_rank:2d}"
-                f" → 重排 {doc.metadata['rerank_rank']:2d}"
-                f" | 分数 {doc.metadata['rerank_score']:.4f}"
-                f" | {format_document_source(doc)}"
-            )
-
-        print(
-            f"\n===== 父级参考资料：{len(context_docs)} 份，共 {sum(len(d.page_content) for d in context_docs)} 字 ====="
-        )
-
-        for index, doc in enumerate(context_docs, start=1):
-            print(f"\n--- 第 {index} 条 ---")
-            print(f"重排分数：{doc.metadata['rerank_score']:.4f}")
-            print(f"来源：{format_document_source(doc)}")
-            print(f"父级 ID：{doc.metadata['parent_id']}")
-            print(doc.page_content)
+    run("rerank")
 
 
 if __name__ == "__main__":

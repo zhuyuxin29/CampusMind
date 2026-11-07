@@ -5,40 +5,39 @@ timings_ms 的单位是毫秒，未执行的阶段为 None；首次初始化耗�
 服务复用检索资源，ChatSession 必须由界面为每个用户单独创建。
 同一会话的请求应串行提交。知识库重建后重启服务以重新加载缓存。
 
-并发：检索资源（HybridRetriever 与父级快照）在首次请求时经 _resource_lock
+并发：索引资源（混合检索器与父级快照）在首次请求时经 _resource_lock
 惰性初始化，之后只读、不再变更，因此不同会话的 ask() 可并发调用；
 同一 ChatSession 仍需串行（历史为可变状态，未加锁）。
 """
 
-from config import (
-    HISTORY_ROUNDS,
-)
+from config import ANSWER_ATTEMPTS, COLLECTION_NAME, HISTORY_ROUNDS
 
 import json
-from copy import deepcopy
+import logging
 from functools import lru_cache
 from threading import Lock
 from time import perf_counter
 
-from langchain_core.documents import Document
-
 from campusmind.generation import (
-    build_messages, format_context, generate_answer,
-    make_insufficient_answer, validate_citations,
-)
-from campusmind.knowledge_base import (
-    COLLECTION_NAME, SPLIT_VERSION, load_parent_documents, open_vector_store,
+    CitationCheckFailed,
+    build_citation_retry_messages,
+    build_messages,
+    format_context,
+    generate_answer,
+    is_insufficient_answer,
+    make_insufficient_answer,
+    select_cited_sources,
 )
 from campusmind.query_processing import (
     ClarificationNeeded, contextualize_question, normalize_queries,
     rewrite_queries, validate_question,
 )
 from campusmind.reranking import rerank_documents, select_context
-from campusmind.retrieval import (
-    CANDIDATE_K, RECALL_K, HybridRetriever, build_bm25_retriever,
-    build_vector_retriever, retrieve_candidates,
-)
+from campusmind.retrieval import open_index, retrieve_candidates
 from campusmind.session_manager import ChatSession
+
+
+logger = logging.getLogger(__name__)
 
 
 STAGES = (
@@ -51,6 +50,25 @@ STAGE_LABELS = dict(zip(STAGES, (
     "混合召回", "重排", "扩展父级资料", "组织提示词", "生成回答",
     "校验引用", "保存问答",
 )))
+
+
+def _failure_message(stage: str, exc: Exception) -> str:
+    """按异常类型给出可操作提示，不暴露 SDK 原始正文。"""
+    name = type(exc).__name__.lower()
+    if isinstance(exc, TimeoutError) or "timeout" in name:
+        return "服务响应超时，请稍后重试。"
+    if isinstance(exc, ConnectionError) or "connection" in name:
+        return "网络连接失败，请检查网络后重试。"
+    if "ratelimit" in name or "rate_limit" in name or "quota" in name:
+        return "接口请求过于频繁或额度不足，请稍后重试。"
+    if "authentication" in name or "permissiondenied" in name or "unauthorized" in name:
+        return "接口凭证无效或权限不足，请检查密钥配置。"
+    if stage == "initialize":
+        return "知识库尚未就绪、内容为空或配置不匹配，请先完成资料入库并检查服务配置。"
+    if stage in {"contextualize", "rewrite", "retrieve", "rerank", "select_context",
+                 "build_messages", "generate"}:
+        return f"{STAGE_LABELS[stage]}服务暂时不可用，请检查网络、密钥及账户额度后重试。"
+    return f"{STAGE_LABELS[stage]}未完成，请检查配置或稍后重试。"
 
 
 class QAService:
@@ -67,40 +85,18 @@ class QAService:
         self._resource_lock = Lock()
 
     def _get_resources(self):
+        """惰性打开并校验索引；成功后才缓存，失败后下次调用仍可重试。"""
         with self._resource_lock:
-            if self._resources is not None:
-                return self._resources
-            # 先确认当前集合的父级快照已 ready，再打开对应向量库。
-            parents = load_parent_documents(self.collection_name)
-            store = open_vector_store(self.collection_name)
-            stored = store.get(include=["documents", "metadatas"])
-            ids = stored.get("ids") or []
-            texts = stored.get("documents") or []
-            metadatas = stored.get("metadatas") or []
-            if not ids or not (len(ids) == len(texts) == len(metadatas)):
-                raise ValueError("知识库为空或记录不完整，请检查入库结果。")
-            documents = []
-            for text, metadata in zip(texts, metadatas):
-                if not isinstance(text, str) or not text.strip() or not isinstance(metadata, dict):
-                    raise ValueError("知识库包含无效文字或元数据。")
-                if metadata.get("split_version") != SPLIT_VERSION or metadata.get("parent_id") not in parents:
-                    raise ValueError("子片段与当前集合的父级快照不匹配。")
-                documents.append(Document(page_content=text, metadata=metadata))
-            retriever = HybridRetriever(
-                bm25_retriever=build_bm25_retriever(documents),
-                vector_retriever=build_vector_retriever(store, k=min(RECALL_K, len(documents))),
-                top_k=CANDIDATE_K,
-            )
-            # 只有全部初始化成功才缓存；失败后下次调用允许重试。
-            # 赋值后 _resources 不再修改，后续并发只读访问是安全的。
-            self._resources = (retriever, parents)
+            if self._resources is None:
+                self._resources = open_index(self.collection_name)
             return self._resources
 
     def ask(self, question: str, session: ChatSession) -> dict:
         """完成一轮问答并返回可直接展示、可 JSON 序列化的结果。
 
         仅 answered 和 insufficient 保存到会话；澄清、无效输入及故障不保存。
-        引用校验失败不返回未经核验的回答正文，也不返回错误来源。
+        引用校验失败不会返回未经核验的回答，也不会进入 error，而是重试一次
+        后降级为 insufficient，并用 insufficient_reason 区分原因。
         """
         started = perf_counter()
         stage = "validate"
@@ -111,6 +107,7 @@ class QAService:
             "message": "", "error_stage": None, "saved": False,
             "collection_name": self.collection_name,
             "candidate_count": 0, "context_count": 0,
+            "context_incomplete": False, "insufficient_reason": None,
             "timings_ms": {name: None for name in STAGES},
         }
 
@@ -145,11 +142,15 @@ class QAService:
             answer = make_insufficient_answer()
             sources = []
             status = "insufficient"
+            insufficient_reason = None
             if candidates:
                 ranked = run("rerank", rerank_documents, standalone, candidates)
                 docs = run("select_context", select_context, ranked, parent_map=parents,
                            collection_name=self.collection_name)
                 result["context_count"] = len(docs)
+                result["context_incomplete"] = any(
+                    doc.metadata.get("context_incomplete") for doc in docs
+                )
 
                 def prepare():
                     context, mapping = format_context(docs)
@@ -157,33 +158,42 @@ class QAService:
 
                 messages, source_map = run("build_messages", prepare)
                 if source_map:
-                    answer = run("generate", generate_answer, messages)
-                    if answer != make_insufficient_answer():
-                        def check_answer():
-                            check = validate_citations(answer, source_map)
-                            if not check["valid"] or not check["has_citations"]:
-                                raise ValueError("引用校验失败。")
-                            return [deepcopy(source_map[i]) for i in check["cited_ids"]]
-
-                        sources = run("validate_citations", check_answer)
+                    for attempt in range(ANSWER_ATTEMPTS):
+                        prompt = messages if attempt == 0 else build_citation_retry_messages(messages)
+                        answer = run("generate", generate_answer, prompt)
+                        if is_insufficient_answer(answer):
+                            answer = make_insufficient_answer()
+                            insufficient_reason = "model_declined"
+                            break
+                        try:
+                            sources = run(
+                                "validate_citations",
+                                select_cited_sources, answer, source_map,
+                            )
+                        except CitationCheckFailed:
+                            sources = []
+                            if attempt + 1 >= ANSWER_ATTEMPTS:
+                                answer = make_insufficient_answer()
+                                insufficient_reason = "citation_unverified"
+                            continue
                         status = "answered"
+                        break
             run("save_session", session.add_turn, question, answer, sources)
-            result.update(answer=answer, sources=sources, status=status, saved=True)
+            result.update(
+                answer=answer, sources=sources, status=status, saved=True,
+                insufficient_reason=insufficient_reason,
+            )
         except ClarificationNeeded as exc:
             result.update(status="needs_clarification", message=str(exc), answer=str(exc))
         except Exception as exc:
-            # 不把 SDK 异常正文（可能带请求数据）直接暴露给界面。
+            # 日志只记录阶段与异常类型，不把 SDK 异常正文或请求数据写入结果。
+            logger.warning("问答未完成：阶段=%s 异常=%s", stage, type(exc).__name__)
+            logger.debug("问答异常详情", exc_info=True)
             if stage == "validate" and isinstance(exc, ValueError):
                 result.update(status="invalid_input", message=str(exc), error_stage=stage)
             else:
-                message = f"{STAGE_LABELS[stage]}未完成，请检查配置或稍后重试。"
-                if stage == "initialize":
-                    message = "知识库尚未就绪、内容为空或配置不匹配，请先完成资料入库并检查服务配置。"
-                elif stage in {"contextualize", "rewrite", "retrieve", "rerank", "generate"}:
-                    message = f"{STAGE_LABELS[stage]}服务暂时不可用，请检查网络、密钥及账户额度后重试。"
-                if stage == "validate_citations":
-                    message = "回答引用校验未通过，请重试。"
-                result.update(status="error", message=message, error_stage=stage)
+                result.update(status="error", message=_failure_message(stage, exc),
+                              error_stage=stage)
         finally:
             result["timings_ms"]["total"] = round((perf_counter() - started) * 1000, 3)
         return result
@@ -220,6 +230,8 @@ def main() -> None:
             pages = str(start) if start == end else f"{start}–{end}"
             print(f"[{source['citation_id']}] {source['file_name']}｜{source['section_title']}｜PDF 第 {pages} 页")
         print(f"状态：{result['status']}")
+        if result.get("insufficient_reason"):
+            print(f"资料不足原因：{result['insufficient_reason']}")
         print("阶段耗时（毫秒，null 表示未执行）：")
         print(json.dumps(result["timings_ms"], ensure_ascii=False))
 

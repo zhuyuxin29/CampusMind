@@ -38,6 +38,35 @@ class ModuleTests(unittest.TestCase):
         for question in ("国家奖学金如何申请？", "有哪些奖学金？", "奖学金有哪些？", "各类奖学金怎么申请？", "国家与英才奖学金有什么区别？", "缓考需要哪些材料？"):
             self.assertFalse(q.needs_scholarship_clarification(question), question)
 
+    def test_named_scholarship_not_forced_to_clarify(self):
+        # B6：校级、企业等明确命名的奖学金不再被强制澄清。
+        for question in ("校级奖学金如何申请？", "企业奖学金申请条件有哪些？",
+                         "校友奖学金怎么申请？", "社会奖学金需要哪些材料？"):
+            self.assertFalse(q.needs_scholarship_clarification(question), question)
+
+    def test_bare_scholarship_still_clarifies(self):
+        for question in ("奖学金如何申请？", "请问奖学金怎么申请？",
+                         "申请奖学金需要哪些材料？", "关于奖学金的条件"):
+            self.assertTrue(q.needs_scholarship_clarification(question), question)
+
+    def test_ambiguous_alias_still_clarifies(self):
+        self.assertTrue(q.needs_scholarship_clarification("励志奖学金需要哪些材料？"))
+        self.assertFalse(q.needs_scholarship_clarification("国家励志奖学金需要哪些材料？"))
+
+    def test_validate_question(self):
+        # D 系列：补充输入校验用例。
+        for bad in (None, 123, [], {}):
+            with self.assertRaises(ValueError):
+                q.validate_question(bad)
+        for bad in ("", "   ", "\n\t", "？？？", "！！！", "😀😀😀", "……"):
+            with self.subTest(question=bad):
+                with self.assertRaises(ValueError):
+                    q.validate_question(bad)
+        with self.assertRaisesRegex(ValueError, "不能超过"):
+            q.validate_question("字" * (q.MAX_QUESTION_CHARS + 1))
+        self.assertEqual(q.validate_question("  缓考需要什么材料？  "), "缓考需要什么材料？")
+        self.assertEqual(q.validate_question("A1"), "A1")
+
     def test_history_user_selection_and_postcheck(self):
         response = {"standalone_question": "国家奖学金申请需要什么材料？", "needs_clarification": False}
         with patch.object(q, "_request_json", return_value=response):

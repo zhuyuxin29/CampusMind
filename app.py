@@ -137,6 +137,8 @@ def render_result(result):
         st.markdown(result["answer"])
     elif status == "insufficient":
         st.info("同学，团团目前还没找到足够的资料，暂时不能确定。你可以补充具体事项，我再帮你查一查～")
+        if result.get("insufficient_reason") == "citation_unverified":
+            st.caption("这次生成的回答没有通过引用核对，团团先不给出未核实的结论。可以换个问法或补充具体事项再试。")
     elif status == "needs_clarification":
         st.info("同学，团团需要再确认一下：" + (result.get("answer") or result.get("message", "请补充具体事项。")))
         st.caption("把具体类别或事项补充到完整问题里，再发给团团吧～")

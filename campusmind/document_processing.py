@@ -6,6 +6,7 @@ from config import (
     PROCESSED_DIR,
     OCR_DIR,
     STRUCTURED_DIR,
+    SPLIT_VERSION,
     CHUNK_SIZE,
     CHUNK_OVERLAP,
 )
@@ -355,6 +356,11 @@ def build_sections(pages: list[Document]) -> tuple[list[Document], list[dict]]:
                 raise ValueError(f"缺少章节所需的 PDF 第 {number} 页。")
             if number in assigned:
                 raise ValueError("章节范围发生重叠。")
+            # 奖学金章节不允许静默跳过空页，否则条款会莫名缺失。
+            if not by_page[number].page_content.strip():
+                raise ValueError(
+                    f"奖学金章节的 PDF 第 {number} 页没有 OCR 文字，请重新识别后再生成。"
+                )
             assigned[number] = spec
         first_lines = by_page[spec["page_start"]].page_content.splitlines()[:8]
         if not any("".join(line.split()) == spec["section_title"] for line in first_lines):
@@ -492,7 +498,7 @@ def split_child_documents(
                 "chunk_index": len(chunks), "child_index": child_index,
                 "page_chunk_number": page_counts[metadata["page_number"]],
                 "parent_start_index": start, "parent_end_index": end,
-                "section_prefix_length": len(prefix), "split_version": "scholarship_parent_child_v2",
+                "section_prefix_length": len(prefix), "split_version": SPLIT_VERSION,
                 "chunk_id": _stable_id(metadata["parent_id"], start, end, prefix),
             })
             content = prefix + child.page_content
@@ -516,7 +522,7 @@ def process_structured_documents(
     save_chunks(parents, output_dir / "parents.json")
     save_chunks(chunks, output_dir / "chunks.json")
     report = {
-        "split_version": "scholarship_parent_child_v2", "input_pages": len(documents),
+        "split_version": SPLIT_VERSION, "input_pages": len(documents),
         "chunk_size": chunk_size, "chunk_overlap": chunk_overlap,
         "parent_count": len(parents), "chunk_count": len(chunks),
         "verified_sections": SCHOLARSHIP_SECTIONS,
@@ -562,8 +568,8 @@ def main() -> None:
     else:
         with pymupdf.open(pdf_path) as pdf:
             total_pages = len(pdf)
-    report = check_extraction(documents, total_pages)
-    if any(report[key] for key in ("missing_pages", "unexpected_pages", "duplicate_pages")):
+    extraction_report = check_extraction(documents, total_pages)
+    if any(extraction_report[key] for key in ("missing_pages", "unexpected_pages", "duplicate_pages")):
         raise ValueError("页面完整性检查未通过。")
     report = process_structured_documents(documents, output_dir)
     # 记录实际输入内容，未来入库时可核对版本。
@@ -574,12 +580,15 @@ def main() -> None:
         "chunks_sha256": hashlib.sha256((output_dir / 'chunks.json').read_bytes()).hexdigest(),
         "parents_sha256": hashlib.sha256((output_dir / 'parents.json').read_bytes()).hexdigest(),
         "split_version": report['split_version'], "chunk_size": CHUNK_SIZE, "chunk_overlap": CHUNK_OVERLAP,
+        # 非奖学金页允许为空（封面、插页等），记入 manifest 供入库时核对。
+        "empty_pages": extraction_report["empty_pages"],
     }
     (output_dir / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
     print("\n===== 第二版文档处理完成 =====")
     for section in SCHOLARSHIP_SECTIONS:
         print(f"{section['scholarship_type']}：PDF 第 {section['page_start']}–{section['page_end']} 页")
     print(f"父级资料：{report['parent_count']}；检索片段：{report['chunk_count']}")
+    print(f"非奖学金空页（已写入 manifest）：{extraction_report['empty_pages']}")
     print(f"已知需核对的 OCR 页：{list(OCR_REVIEW_NOTES)}")
     print(f"输出目录：{output_dir}")
     print("请先检查 scholarship_preview.txt。旧 chunks.json 和 Chroma 集合未修改。")

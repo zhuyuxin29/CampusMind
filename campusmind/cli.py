@@ -1,0 +1,170 @@
+"""统一调试 CLI：按阶段查看查询处理、召回、重排与回答。
+
+用法（项目根目录，先完成资料入库）：
+  python -m campusmind.cli --stage query       # 查询处理：补全 + 改写
+  python -m campusmind.cli --stage retrieve    # 混合召回
+  python -m campusmind.cli --stage rerank      # 重排 + 父级扩展
+  python -m campusmind.cli --stage answer      # 完整问答（调用模型，保存会话）
+
+各阶段共享同一个混合检索器；answer 阶段才调用回答模型并保存多轮历史。
+原先分散在 query_processing/retrieval/reranking/generation 各自 main() 的
+调试逻辑集中在此，各模块的 main() 仍可运行并委托到这里。
+"""
+
+import argparse
+import logging
+
+import jieba
+
+from config import CONTEXT_TOP_N, HISTORY_ROUNDS
+from campusmind.generation import answer_question
+from campusmind.knowledge_base import COLLECTION_NAME
+from campusmind.query_processing import (
+    ClarificationNeeded,
+    contextualize_question,
+    normalize_queries,
+    rewrite_queries,
+    validate_question,
+)
+from campusmind.reranking import rerank_documents, select_context
+from campusmind.retrieval import (
+    build_hybrid_retriever,
+    format_document_source,
+    retrieve_candidates,
+)
+from campusmind.session_manager import ChatSession
+
+
+STAGES = ("query", "retrieve", "rerank", "answer")
+
+
+def _print_queries(queries: list[str]) -> None:
+    print("\n===== 实际检索查询 =====")
+    for index, query in enumerate(queries, start=1):
+        print(f"{index}. {query}")
+
+
+def _print_candidates(candidates) -> None:
+    print(f"\n===== 混合召回结果：{len(candidates)} 个候选 =====")
+    for index, doc in enumerate(candidates, start=1):
+        print(f"\n--- 第 {index} 条 ---")
+        print(f"片段 ID：{doc.metadata['chunk_id']}")
+        print(f"RRF 分数：{doc.metadata['rrf_score']:.6f}")
+        print(f"来源：{format_document_source(doc)}")
+        print(doc.page_content)
+
+
+def _print_ranked(ranked_docs) -> None:
+    print("\n===== 全部候选的重排分数 =====")
+    for doc in ranked_docs:
+        original_rank = doc.metadata["rerank_input_index"] + 1
+        print(
+            f"原排名 {original_rank:2d}"
+            f" → 重排 {doc.metadata['rerank_rank']:2d}"
+            f" | 分数 {doc.metadata['rerank_score']:.4f}"
+            f" | {format_document_source(doc)}"
+        )
+
+
+def _print_context(context_docs) -> None:
+    print(
+        f"\n===== 父级参考资料：{len(context_docs)} 份，"
+        f"共 {sum(len(d.page_content) for d in context_docs)} 字 ====="
+    )
+    for index, doc in enumerate(context_docs, start=1):
+        print(f"\n--- 第 {index} 条 ---")
+        print(f"重排分数：{doc.metadata['rerank_score']:.4f}")
+        print(f"来源：{format_document_source(doc)}")
+        print(f"父级 ID：{doc.metadata['parent_id']}")
+        print(doc.page_content)
+
+
+def _print_answer(result: dict) -> None:
+    print(f"\n{result['answer']}")
+    if result["sources"]:
+        print("\n参考来源（PDF 页码）：")
+    for source in result["sources"]:
+        start, end = source["page_start"], source["page_end"]
+        pages = "未知" if start is None else str(start) if end == start else f"{start}–{end}"
+        print(f"[{source['citation_id']}] {source['file_name']}，第 {pages} 页")
+
+
+def _resolve(question: str, history: list[dict]):
+    """validate → contextualize → rewrite → normalize，返回完整问题与检索查询。"""
+    question = validate_question(question)
+    standalone = contextualize_question(question, history)
+    rewrites = rewrite_queries(standalone)
+    return standalone, normalize_queries(standalone, rewrites)
+
+
+def run(stage: str) -> None:
+    """进入指定阶段的交互式调试循环。"""
+    logging.basicConfig(level=logging.WARNING)
+    jieba.setLogLevel(logging.WARNING)
+
+    if stage not in STAGES:
+        raise ValueError(f"未知阶段：{stage}，可选 {'/'.join(STAGES)}")
+
+    need_index = stage in {"retrieve", "rerank", "answer"}
+    retriever = build_hybrid_retriever(COLLECTION_NAME) if need_index else None
+    session = ChatSession(history_rounds=HISTORY_ROUNDS)
+
+    print(f"===== CampusMind 调试 · 阶段：{stage} =====")
+    print(f"集合：{COLLECTION_NAME}")
+    print("输入完整问题开始，exit 退出；answer 阶段可用 clear 清空会话。")
+
+    while True:
+        question = input("\n请输入问题：").strip()
+        if question.lower() in {"exit", "quit"}:
+            break
+        if stage == "answer" and question.lower() == "clear":
+            session.clear()
+            print("会话已清空。")
+            continue
+
+        try:
+            history = session.get_recent_history() if stage == "answer" else []
+            standalone, queries = _resolve(question, history)
+
+            if stage == "query":
+                print(f"\n完整问题：{standalone}")
+                _print_queries(queries)
+                continue
+
+            candidates = retrieve_candidates(queries=queries, retriever=retriever)
+            if stage == "retrieve":
+                _print_candidates(candidates)
+                continue
+            if not candidates:
+                print("没有召回候选片段。")
+                continue
+
+            print(f"\n正在对 {len(candidates)} 个候选片段重排……", flush=True)
+            ranked_docs = rerank_documents(question=standalone, candidates=candidates)
+            context_docs = select_context(ranked_docs, top_n=CONTEXT_TOP_N)
+            if stage == "rerank":
+                _print_ranked(ranked_docs)
+                _print_context(context_docs)
+                continue
+
+            result = answer_question(standalone, context_docs, history)
+            session.add_turn(question, result["answer"], result["sources"])
+            _print_answer(result)
+        except ClarificationNeeded as exc:
+            print(f"需要补充信息：{exc}")
+        except (ValueError, RuntimeError) as exc:
+            print(f"处理未完成：{exc}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="CampusMind 分阶段调试 CLI。")
+    parser.add_argument(
+        "--stage", choices=STAGES, default="answer",
+        help="调试阶段（默认 answer）",
+    )
+    args = parser.parse_args()
+    run(args.stage)
+
+
+if __name__ == "__main__":
+    main()
