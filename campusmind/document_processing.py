@@ -240,7 +240,7 @@ def split_documents(
     nonempty_documents = [
         doc for doc in documents if doc.page_content.strip()
     ]
-
+    # 空白页保留页码，但不参与切片。
     chunks = splitter.split_documents(nonempty_documents)
 
     page_chunk_counts = Counter()

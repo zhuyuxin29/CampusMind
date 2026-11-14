@@ -27,6 +27,7 @@ from campusmind.query_processing import validate_question
 
 
 def _post_rerank(*args, **kwargs):
+    # 只重试连接失败、429 和暂时性 5xx。
     retry = Retry(total=RERANK_MAX_RETRIES, backoff_factor=0.5,
                   status_forcelist=(429, 502, 503, 504), allowed_methods={"POST"},
                   respect_retry_after_header=False, raise_on_status=False)

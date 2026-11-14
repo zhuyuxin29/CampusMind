@@ -183,6 +183,7 @@ def _validate_relationships(chunks: list[Document], parent_map: dict[str, Docume
 
 def load_structured_documents(pdf_path: Path) -> tuple[list[Document], dict[str, Document], dict, bytes]:
     pdf_path = Path(pdf_path).resolve()
+    # 启动时校验 PDF/OCR/切片版本，避免引用旧库。
     manifest = _read_json(STRUCTURED_DIR / "manifest.json")
     if not isinstance(manifest, dict) or manifest.get("split_version") != SPLIT_VERSION:
         raise ValueError("不支持该结构化结果版本，请运行新版 document_processing。")

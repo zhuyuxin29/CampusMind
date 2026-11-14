@@ -183,6 +183,7 @@ def citation_support(answer: str, source_map: dict[int, dict]) -> dict:
         raise ValueError("answer 必须是字符串。")
 
     unsupported: list[str] = []
+    # 编号存在不等于内容相关，再查数字和词面重叠。
     for sentence in re.split(r"(?<=[。！？!?])|\n+", answer):
         cited = sorted({int(v) for v in CITATION_PATTERN.findall(sentence)})
         if not cited:

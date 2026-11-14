@@ -101,7 +101,7 @@ def fuse_rankings(
     scores = defaultdict(float)
     documents_by_id = {}
 
-
+    # 多路召回按名次累加，不用手工权重。
     list_weight = 1.0 / len(result_lists)
 
     for documents in result_lists:
