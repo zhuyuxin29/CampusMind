@@ -45,7 +45,6 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNone(result["timings_ms"]["generate"])
 
     def test_missing_api_keys_is_config_error(self):
-        # 没填 .env 时直接提示配置问题，而不是误报网络/额度故障。
         with patch.object(q, "missing_api_keys", return_value=["DEEPSEEK_API_KEY"]):
             result = self.service.ask("问题", self.session)
         self.assertEqual(result["status"], "error")
@@ -72,7 +71,6 @@ class ServiceTests(unittest.TestCase):
         self.mocks["generate_answer"].assert_not_called()
 
     def test_invalid_citations_degrade_to_insufficient_after_retry(self):
-        # B1：引用校验失败不再进入 error；重试一次后降级为资料不足。
         for answer in ("错误引用[99]", "无引用的结论", "食堂有500个鸡腿[1]。"):
             with self.subTest(answer=answer):
                 self.mocks["generate_answer"].reset_mock()
@@ -113,7 +111,6 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("网络", result["message"])
 
     def test_service_error_message_is_kept(self):
-        # P1-2：项目内安全异常的中文说明不能被泛化成“网络/额度”提示。
         self.mocks["generate_answer"].side_effect = ServiceError(
             "模型未正常完成回答，请重试或缩小问题范围。"
         )
@@ -131,7 +128,6 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNone(result["timings_ms"]["validate_citations"])
 
     def test_insufficient_detection_tolerates_noise(self):
-        # B1：固定句子带前后缀、空白或 Markdown 装饰时仍按资料不足处理。
         self.mocks["generate_answer"].return_value = (
             " 抱歉，\n当前资料不足以回答这个问题，请补充具体事项或相关资料。 \n"
         )
@@ -141,7 +137,6 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNone(result["error_stage"])
 
     def test_punctuation_only_input_is_invalid(self):
-        # B2：纯标点或 emoji 是输入问题，不能误报为网络/密钥故障。
         for question in ("？？？", "！！！", "😀😀😀", "。。。", "  !?  "):
             with self.subTest(question=question):
                 result = self.service.ask(question, self.session)
@@ -150,7 +145,6 @@ class ServiceTests(unittest.TestCase):
         self.resource.assert_not_called()
 
     def test_context_incomplete_flagged(self):
-        # B3：父级预算跳过时，结果带 context_incomplete 标记。
         self.mocks["select_context"].return_value = [Document(
             page_content="测试原文",
             metadata={"file_name": "手册.pdf", "page_start": 2, "page_end": 4,
@@ -161,7 +155,6 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(result["context_incomplete"])
 
     def test_context_incomplete_when_all_parents_skipped(self):
-        # P1-3：所有父级都因预算被跳过、docs 为空时也要保留裁剪标记。
         def fake_select(ranked, **kwargs):
             kwargs["stats"].update(
                 {"truncated": True, "selected_count": 0, "skipped_count": 1}
@@ -191,7 +184,6 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["error_stage"], "save_session")
 
     def test_initialization_cached_and_failure_retryable(self):
-        # B5：服务与调试入口共用 open_index，失败后不缓存，下次可重试。
         service = q.QAService()
         calls = []
 
@@ -211,7 +203,6 @@ class ServiceTests(unittest.TestCase):
 
 
     def test_session_from_previous_module_load_keeps_history(self):
-        # 同一份源码加载成新的类，模拟热更新前留在页面里的旧实例。
         import importlib.util
         import campusmind.session_manager as manager
         spec = importlib.util.spec_from_file_location("previous_session_manager", manager.__file__)
@@ -233,7 +224,6 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(result["status"], "invalid_input")
             self.assertFalse(result["saved"])
         self.resource.assert_not_called()
-
 
 
 if __name__ == "__main__":

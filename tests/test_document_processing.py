@@ -38,14 +38,12 @@ def make_pages(empty=(), start=119, end=132):
 
 class DocumentProcessingTests(unittest.TestCase):
     def test_split_version_single_source(self):
-        # B7：SPLIT_VERSION 只从 config 导入，不再写死在文档处理模块。
         from config import SPLIT_VERSION
         self.assertEqual(d.SPLIT_VERSION, SPLIT_VERSION)
         source = Path(d.__file__).read_text(encoding="utf-8")
         self.assertNotIn('"scholarship_parent_child_v2"', source)
 
     def test_empty_scholarship_page_fails_fast(self):
-        # B4：奖学金章节的空页不能静默跳过，否则条款会莫名缺失。
         for number in (119, 121, 125, 129, 131):
             with self.subTest(page=number):
                 with self.assertRaisesRegex(ValueError, "没有 OCR 文字"):

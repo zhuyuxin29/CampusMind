@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class ClarificationNeeded(ValueError):
-    """历史信息不足，需要用户澄清问题。"""
+    pass
 
 
 SCHOLARSHIP_TYPES = ("国家奖学金", "国家励志奖学金", "英才奖学金", "湘信励志奖学金")
@@ -32,13 +32,13 @@ SCHOLARSHIP_CLARIFICATION = (
     "你想咨询哪一种奖学金：国家奖学金、国家励志奖学金、英才奖学金，"
     "还是湘信励志奖学金？也可以说明其他奖学金名称，或明确要比较各类奖学金。"
 )
-# 可能同时指国家励志或湘信励志，用户只写“励志奖学金”时仍需澄清。
+
 SCHOLARSHIP_AMBIGUOUS_ALIASES = ("励志奖学金",)
 SCHOLARSHIP_ACTION_WORDS = (
     "申请", "申报", "条件", "材料", "流程", "评选", "评审", "资格", "要求",
     "金额", "多少钱", "时间", "截止", "名额", "成绩", "挂科", "发放",
 )
-# “奖学金”前面是这些词时仍算裸词，不是具体奖学金名称。
+
 BARE_SCHOLARSHIP_PREFIXES = (
     "申请", "申报", "获得", "领取", "评选", "评定", "咨询", "了解", "请问",
     "关于", "有关", "各类", "各种", "各项", "哪些", "所有", "全部",
@@ -48,7 +48,6 @@ BARE_SCHOLARSHIP_PREFIXES = (
 
 
 def _mentions_bare_scholarship(text: str) -> bool:
-    """判断“奖学金”是否没有被校级、企业等具体名称限定。"""
     for match in re.finditer("奖学金", text):
         prefix = text[max(0, match.start() - 6):match.start()]
         if not prefix or not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", prefix[-1]):
@@ -59,16 +58,15 @@ def _mentions_bare_scholarship(text: str) -> bool:
 
 
 def needs_scholarship_clarification(question: str) -> bool:
-    """兜底识别未指定类别的办理问题；明确命名、分类介绍和比较不强制澄清。"""
     text = "".join(question.split())
     if "奖学金" not in text or any(name in text for name in SCHOLARSHIP_TYPES):
         return False
     if re.search(r"(?:有|包括)哪些奖学金|奖学金(?:都)?有哪些[？?。！!]*$|哪几种|种类|类型|类别|区别|比较|对比|分别|各类|所有|全部|各项", text):
         return False
-    # “励志奖学金”可能指国家励志或湘信励志，保留澄清。
+
     if any(alias in text for alias in SCHOLARSHIP_AMBIGUOUS_ALIASES):
         return True
-    # 只有裸“奖学金”才澄清；校级、企业等命名奖学金放行给检索。
+
     if not _mentions_bare_scholarship(text):
         return False
     return any(word in text for word in SCHOLARSHIP_ACTION_WORDS)
@@ -76,8 +74,6 @@ def needs_scholarship_clarification(question: str) -> bool:
 
 @lru_cache(maxsize=1)
 def _get_query_llm():
-    """创建并复用查询处理客户端；导入模块时不会调用接口。"""
-
     api_key = get_api_key("DEEPSEEK_API_KEY")
 
     llm = ChatOpenAI(
@@ -95,7 +91,6 @@ def _get_query_llm():
 
 
 def _request_json(system_prompt: str, payload: dict) -> dict:
-    """调用模型并检查返回值是否为 JSON 对象。"""
     response = _get_query_llm().invoke(
         [
             SystemMessage(content=system_prompt),
@@ -117,7 +112,6 @@ def _request_json(system_prompt: str, payload: dict) -> dict:
 
 
 def validate_question(question: str) -> str:
-    """检查问题类型、空白、可检索文字和长度，返回去掉首尾空白的问题。"""
     if not isinstance(question, str):
         raise ValueError("问题必须是字符串。")
 
@@ -126,7 +120,7 @@ def validate_question(question: str) -> str:
     if not question:
         raise ValueError("问题不能为空。")
 
-    # 纯标点或 emoji 无法检索，提前按输入错误处理，不进入模型或检索流程。
+
     if not any(char.isalnum() for char in question):
         raise ValueError("问题中没有可检索的文字，请描述具体的校园规定问题。")
 
@@ -143,10 +137,9 @@ def contextualize_question(
     question: str,
     history: list[dict],
 ) -> str:
-    """结合历史，将当前问题补全成可以独立检索的问题。"""
     question = validate_question(question)
 
-    # 用户没有指定类别时，不能让模型根据常见程度或旧回答擅自选一种。
+
     user_selected_type = any(
         name in turn.get("question", "")
         for turn in history for name in SCHOLARSHIP_TYPES
@@ -154,7 +147,7 @@ def contextualize_question(
     if needs_scholarship_clarification(question) and not user_selected_type:
         raise ClarificationNeeded(SCHOLARSHIP_CLARIFICATION)
 
-    # 不传引用来源，历史只用于理解问题
+
     context = [
         {
             "question": turn["question"],
@@ -235,7 +228,6 @@ def contextualize_question(
     except ClarificationNeeded:
         raise
     except Exception as exc:
-        # 补全失败时停止，避免拿一个失去上下文的追问直接检索
         raise ServiceError(
             f"问题补全失败（{type(exc).__name__}），"
             "请重试或把问题写完整。"
@@ -243,7 +235,6 @@ def contextualize_question(
 
 
 def rewrite_queries(standalone_question: str) -> list[str]:
-    """生成最多两条等义检索表达；失败时返回空列表。"""
     standalone_question = validate_question(standalone_question)
 
     system_prompt = """
@@ -269,7 +260,7 @@ def rewrite_queries(standalone_question: str) -> list[str]:
 }
 """
 
-    # 配置缺失时明确报错，不静默忽略
+
     _get_query_llm()
 
     try:
@@ -283,13 +274,13 @@ def rewrite_queries(standalone_question: str) -> list[str]:
         if not isinstance(queries, list):
             raise ValueError("改写结果中的 queries 不是列表。")
 
-        # 统一检查格式、去重，并限制数量
+
         normalized = normalize_queries(
             standalone_question,
             queries,
         )
 
-        # 第一条是补全后的原问题，这里只返回改写部分
+
         return normalized[1:]
 
     except Exception as exc:
@@ -305,13 +296,12 @@ def normalize_queries(
     rewrites: list[str],
     max_queries: int = MAX_QUERIES,
 ) -> list[str]:
-    """保留完整原问题，去除空白和重复改写，并限制查询数量。"""
     original = validate_question(original)
 
     if max_queries < 1:
         raise ValueError("max_queries 必须大于等于 1。")
 
-    # 这里的 original 指结合历史补全后的完整问题
+
     queries = [original]
     seen = {" ".join(original.split()).casefold()}
 
@@ -339,7 +329,6 @@ def normalize_queries(
 
 
 def main() -> None:
-    """调试入口：见 campusmind.cli（--stage query）。"""
     from campusmind.cli import run
 
     run("query")

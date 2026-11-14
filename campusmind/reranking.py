@@ -26,11 +26,7 @@ from campusmind.errors import ServiceError
 from campusmind.query_processing import validate_question
 
 
-# 最多选取三份不同父级资料；正文总字数上限，不包含提示词和历史。
-
-
 def _post_rerank(*args, **kwargs):
-    """仅对连接失败、限流和暂时性服务错误做有限重试。"""
     retry = Retry(total=RERANK_MAX_RETRIES, backoff_factor=0.5,
                   status_forcelist=(429, 502, 503, 504), allowed_methods={"POST"},
                   respect_retry_after_header=False, raise_on_status=False)
@@ -43,7 +39,6 @@ def rerank_documents(
     question: str,
     candidates: list[Document],
 ) -> list[Document]:
-    """调用重排模型，对候选片段重新评分和排序。"""
     question = validate_question(question)
 
     if not candidates:
@@ -57,12 +52,12 @@ def rerank_documents(
 
     payload = {
         "model": RERANK_MODEL,
-        # 使用完整问题，不使用某一条关键词改写
+
         "query": question,
         "documents": [
             doc.page_content for doc in candidates
         ],
-        # 返回全部候选的分数，后面由 select_context 选取
+
         "top_n": len(candidates),
         "return_documents": False,
     }
@@ -100,7 +95,6 @@ def parse_rerank_results(
     response: dict,
     candidates: list[Document],
 ) -> list[Document]:
-    """按返回的 index 映射原始片段，保留来源和其他元数据。"""
     if not isinstance(response, dict):
         raise ValueError("重排响应必须是 JSON 对象。")
 
@@ -109,7 +103,7 @@ def parse_rerank_results(
     if not isinstance(results, list):
         raise ValueError("重排响应缺少有效的 results 列表。")
 
-    # 请求时要求返回全部候选，因此这里检查完整性
+
     if len(results) != len(candidates):
         raise ValueError(
             f"重排结果不完整：输入 {len(candidates)} 个片段，"
@@ -145,7 +139,7 @@ def parse_rerank_results(
 
         seen_indices.add(index)
 
-        # index 从 0 开始，对应提交给接口的候选位置
+
         original = candidates[index]
         metadata = original.metadata.copy()
 
@@ -156,7 +150,7 @@ def parse_rerank_results(
             }
         )
 
-        # 新建 Document，不修改原来的候选片段
+
         ranked_docs.append(
             Document(
                 page_content=original.page_content,
@@ -164,7 +158,7 @@ def parse_rerank_results(
             )
         )
 
-    # 明确按分数降序排序；同分时保留原候选顺序
+
     ranked_docs.sort(
         key=lambda doc: (
             -doc.metadata["rerank_score"],
@@ -187,17 +181,6 @@ def select_context(
     collection_name: str = COLLECTION_NAME,
     stats: dict | None = None,
 ) -> list[Document]:
-    """按子片段排名扩展完整父级、按 parent_id 去重，并控制正文预算。
-
-    父级来自当前集合的版本快照。保留父级原文和页码，不用子片段元数据
-    覆盖父级来源。无法完整放入剩余预算的资料统一跳过（包括排名第一的超长
-    父级），不截断条款或例外；发生跳过的已选资料带 context_incomplete 标记
-    （表示本轮上下文有遗漏，而非单个文档被截断）。
-
-    传入 stats 字典时额外写入本轮统计：selected_count、skipped_count、
-    truncated、context_chars。即使所有父级都被跳过（返回空列表），调用方
-    也能通过 stats 区分“确实裁剪过”和“本来就没有资料”。
-    """
     if type(top_n) is not int or top_n < 1:
         raise ValueError("top_n 必须大于等于 1。")
     if type(max_chars) is not int or max_chars < 1:
@@ -238,7 +221,7 @@ def select_context(
             )
             continue
         metadata = deepcopy(parent.metadata)
-        # 重排分数属于命中的子片段，作为父级优先级；来源字段仍属于父级。
+
         for key in ("rerank_score", "rerank_rank", "rerank_input_index", "rrf_score"):
             if key in child.metadata:
                 metadata[key] = child.metadata[key]
@@ -251,7 +234,7 @@ def select_context(
         total_chars += size
         if len(selected) == top_n:
             break
-    # 只要发生过预算跳过，就标记本轮上下文不完整，便于界面和评估区分。
+
     for document in selected:
         document.metadata["context_incomplete"] = skipped > 0
     if stats is not None:
@@ -265,7 +248,6 @@ def select_context(
 
 
 def main() -> None:
-    """调试入口：见 campusmind.cli（--stage rerank）。"""
     from campusmind.cli import run
 
     run("rerank")

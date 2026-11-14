@@ -6,7 +6,6 @@ from campusmind import cli
 
 class CliTests(unittest.TestCase):
     def test_eof_and_interrupt_exit_cleanly(self):
-        # P1-1：Ctrl+C / 关闭输入时应正常退出，不打印 Traceback。
         for exc in (EOFError, KeyboardInterrupt):
             with self.subTest(exc=exc), patch("builtins.input", side_effect=exc):
                 cli.run("query")
@@ -16,7 +15,6 @@ class CliTests(unittest.TestCase):
             cli.run("nope")
 
     def test_answer_stage_uses_qa_service(self):
-        # P1-5：answer 阶段复用 QAService，保持与网页/终端入口一致。
         fake_service = Mock()
         fake_service.ask.return_value = {
             "status": "insufficient",

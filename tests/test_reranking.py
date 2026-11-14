@@ -25,7 +25,6 @@ def child(key, score=0.9):
         "rerank_score": score, "rerank_rank": 1, "chunk_id": key + "-child"})
 
 
-
 class ModuleTests(unittest.TestCase):
     def test_expand_dedup_rank_and_own_pages(self):
         parents = {"a": parent("a", "父级完整原文"), "b": parent("b", "第二份原文", 3, 4)}
@@ -43,7 +42,6 @@ class ModuleTests(unittest.TestCase):
         self.assertEqual(sum(len(d.page_content) for d in result), 9)
 
     def test_oversized_parent_skipped_and_flagged(self):
-        # B3：排名第一的父级超长也统一跳过，不再让整题失败。
         parents = {"a": parent("a", "123456"), "b": parent("b", "12")}
         result = r.select_context([child("a"), child("b")], max_chars=3, parent_map=parents)
         self.assertEqual([d.metadata["parent_id"] for d in result], ["b"])
@@ -59,7 +57,6 @@ class ModuleTests(unittest.TestCase):
         self.assertFalse(result[0].metadata["context_incomplete"])
 
     def test_budget_stats(self):
-        # P1-3：即使全部父级被跳过（返回空列表），也要通过 stats 报告裁剪。
         parents = {"a": parent("a", "12345"), "b": parent("b", "123456")}
         stats = {}
         result = r.select_context(
@@ -105,15 +102,15 @@ class ModuleTests(unittest.TestCase):
             [],
             {},
             {"results": "bad"},
-            {"results": [{"index": 0, "relevance_score": 0.5}]},  # 数量不完整
+            {"results": [{"index": 0, "relevance_score": 0.5}]},
             {"results": [{"index": 0, "relevance_score": 0.5},
-                         {"index": 0, "relevance_score": 0.4}]},  # 重复 index
+                         {"index": 0, "relevance_score": 0.4}]},
             {"results": [{"index": 2, "relevance_score": 0.5},
-                         {"index": 0, "relevance_score": 0.4}]},  # 越界
+                         {"index": 0, "relevance_score": 0.4}]},
             {"results": [{"index": 0, "relevance_score": True},
-                         {"index": 1, "relevance_score": 0.4}]},  # 布尔分数
+                         {"index": 1, "relevance_score": 0.4}]},
             {"results": [{"index": 0, "relevance_score": float("nan")},
-                         {"index": 1, "relevance_score": 0.4}]},  # NaN
+                         {"index": 1, "relevance_score": 0.4}]},
         )
         for response in invalid_responses:
             with self.subTest(response=response):

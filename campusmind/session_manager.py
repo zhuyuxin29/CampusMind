@@ -6,19 +6,13 @@ from copy import deepcopy
 
 
 class ChatSession:
-    """管理当前会话的完整问答轮次，历史暂存在内存中。"""
-
     def __init__(self, history_rounds: int = HISTORY_ROUNDS):
-        """
-        history_rounds：默认取最近几轮问答作为上下文。
-        一轮 = 用户的一个问题 + 系统的一个回答。
-        """
         if history_rounds < 1:
             raise ValueError("history_rounds 必须大于等于 1。")
 
         self.history_rounds = history_rounds
 
-        # 每个 ChatSession 对象都有自己的历史记录
+
         self._turns: list[dict] = []
 
     def add_turn(
@@ -27,7 +21,6 @@ class ChatSession:
         answer: str,
         sources: list[dict] | None = None,
     ) -> None:
-        """保存一轮成功的问答和参考来源。"""
         question = question.strip()
         answer = answer.strip()
 
@@ -40,7 +33,7 @@ class ChatSession:
         turn = {
             "question": question,
             "answer": answer,
-            # 复制数据，避免外部修改影响已保存的历史
+
             "sources": deepcopy(sources) if sources is not None else [],
         }
 
@@ -50,10 +43,6 @@ class ChatSession:
         self,
         rounds: int | None = None,
     ) -> list[dict]:
-        """
-        获取最近几轮完整问答，按时间从早到晚排列。
-        供后面的查询处理模块使用。
-        """
         if rounds is None:
             rounds = self.history_rounds
 
@@ -63,10 +52,6 @@ class ChatSession:
         return deepcopy(self._turns[-rounds:])
 
     def get_messages(self) -> list[dict]:
-        """
-        返回界面展示用的全部消息。
-        每轮问答转换为一条用户消息和一条助手消息。
-        """
         messages = []
 
         for turn in self._turns:
@@ -88,13 +73,11 @@ class ChatSession:
         return messages
 
     def clear(self) -> None:
-        """清空当前会话的所有历史记录。"""
         self._turns.clear()
 
 
 def main() -> None:
-    # 以下是测试数据，不是实际检索或模型生成的结果
-    session = ChatSession(history_rounds=2) #修改这个参数，就能改变 get_recent_history() 默认读取的历史轮数
+    session = ChatSession(history_rounds=2)
 
     session.add_turn(
         question="如何申请缓考？",
@@ -132,7 +115,7 @@ def main() -> None:
     for message in messages:
         print(f"{message['role']}：{message['content']}")
 
-    # 新建对象，验证不同会话不会共用历史
+
     another_session = ChatSession()
 
     print("\n===== 会话隔离 =====")

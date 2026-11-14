@@ -1,4 +1,3 @@
-# 离线界面测试：python -m unittest test_app；不发送模型请求。
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -20,7 +19,6 @@ class AppTests(unittest.TestCase):
             self.assertTrue(app.warning)
 
     def test_context_incomplete_caption(self):
-        # P1-3：上下文被预算裁剪时，界面要给出提示。
         result = {"status": "answered", "answer": "测试回答[1]", "sources": [],
                   "context_incomplete": True}
         with patch.object(config, "missing_api_keys", return_value=[]), \
@@ -95,4 +93,3 @@ class AppTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

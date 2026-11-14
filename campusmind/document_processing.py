@@ -1,5 +1,3 @@
-# 文档处理模块：保留旧切分接口；主入口生成奖学金章节的父子片段。
-
 from config import (
     PROJECT_DIR,
     PDF_PATH,
@@ -27,7 +25,6 @@ def preview_pdf_ocr(
     output_dir: Path,
     page_numbers: list[int] | None = None,
 ) -> None:
-    """识别 PDF 页面并保存图片和文字，不指定页码则处理全部页面。"""
     import pymupdf
     from rapidocr import RapidOCR
 
@@ -83,7 +80,6 @@ def load_ocr_documents(
     ocr_dir: Path,
     pdf_path: Path,
 ) -> list[Document]:
-    """读取逐页 OCR 文本，附上来源和 PDF 页码。"""
     if not ocr_dir.is_dir():
         raise FileNotFoundError(f"OCR 结果目录不存在：{ocr_dir}")
 
@@ -130,7 +126,6 @@ def check_extraction(
     total_pages: int,
     min_chars: int = 30,
 ) -> dict:
-    """检查页面完整性和文字量，不修改原始内容。"""
     page_numbers = [
         doc.metadata["page_number"] for doc in documents
     ]
@@ -185,7 +180,6 @@ def check_extraction(
 def clean_documents(
     documents: list[Document],
 ) -> list[Document]:
-    """保守清洗空白字符，保留原文信息和元数据。"""
     cleaned_documents = []
 
     for doc in documents:
@@ -222,7 +216,6 @@ def split_documents(
     chunk_size: int = CHUNK_SIZE,
     chunk_overlap: int = CHUNK_OVERLAP,
 ) -> list[Document]:
-    """兼容旧版 knowledge_base.py 的逐页切分；新版使用 split_child_documents。"""
     if chunk_size <= 0:
         raise ValueError("chunk_size 必须大于 0")
 
@@ -235,7 +228,7 @@ def split_documents(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         length_function=len,
-        # 依次尝试空行、句末标点、换行等边界
+
         separators=[
             "\n\n", "。", "！", "？", "\n", "；", "，", " ", ""
         ],
@@ -243,7 +236,7 @@ def split_documents(
         is_separator_regex=False,
     )
 
-    # 空白页仍保留在页面数据中，但不生成检索片段
+
     nonempty_documents = [
         doc for doc in documents if doc.page_content.strip()
     ]
@@ -259,10 +252,10 @@ def split_documents(
         )
         page_chunk_counts[page_key] += 1
 
-        # 全部片段的顺序编号，从 0 开始
+
         chunk.metadata["chunk_index"] = chunk_index
 
-        # 当前页内的片段编号，从 1 开始
+
         chunk.metadata["page_chunk_number"] = page_chunk_counts[page_key]
         chunk.metadata["char_count"] = len(chunk.page_content)
 
@@ -273,7 +266,6 @@ def save_chunks(
     chunks: list[Document],
     output_path: Path,
 ) -> None:
-    """将片段文字和元数据一起保存为 JSON。"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     records = [
@@ -290,9 +282,6 @@ def save_chunks(
     )
 
 
-# 以下章节范围已经对照当前手册的 OCR 和 PDF 正文确认。
-# 数字都是 PDF 阅读器页码，不是目录中的印刷页码。
-# 第一阶段只为四类奖学金确认章节边界，其余页面不跨页合并。
 SCHOLARSHIP_SECTIONS = [
     {"section_id": "national_scholarship", "scholarship_type": "国家奖学金",
      "section_title": "湖南信息学院国家奖学金评审办法", "page_start": 119, "page_end": 124},
@@ -304,7 +293,7 @@ SCHOLARSHIP_SECTIONS = [
      "section_title": "湖南信息学院湘信励志奖学金评审办法", "page_start": 129, "page_end": 131},
 ]
 
-# 人工抽查发现的问题只登记、不猜测修正文；此列表不是全书质量检查结果。
+
 OCR_REVIEW_NOTES = {
     122: "申请表：纯文本 OCR 未保留表格行列关系，使用前对照原页。",
     123: "申请表续页：纯文本 OCR 未保留表格行列关系。",
@@ -320,7 +309,6 @@ def _stable_id(*parts) -> str:
 
 
 def _remove_verified_margins(doc: Document, audit: list[dict]) -> str:
-    """仅用于已核对的奖学金页；只去掉边缘的已知校徽文字和横线页码。"""
     lines = doc.page_content.splitlines()
     nonempty = [i for i, line in enumerate(lines) if line.strip()]
     removed = set()
@@ -341,7 +329,6 @@ def _remove_verified_margins(doc: Document, audit: list[dict]) -> str:
 
 
 def build_sections(pages: list[Document]) -> tuple[list[Document], list[dict]]:
-    """奖学金按已确认的制度范围合并，其余内容逐页保留，记录页码映射。"""
     if not pages:
         raise ValueError("没有页面可供组织章节。")
     if len({p.metadata['source'] for p in pages}) != 1:
@@ -356,7 +343,7 @@ def build_sections(pages: list[Document]) -> tuple[list[Document], list[dict]]:
                 raise ValueError(f"缺少章节所需的 PDF 第 {number} 页。")
             if number in assigned:
                 raise ValueError("章节范围发生重叠。")
-            # 奖学金章节不允许静默跳过空页，否则条款会莫名缺失。
+
             if not by_page[number].page_content.strip():
                 raise ValueError(
                     f"奖学金章节的 PDF 第 {number} 页没有 OCR 文字，请重新识别后再生成。"
@@ -365,7 +352,7 @@ def build_sections(pages: list[Document]) -> tuple[list[Document], list[dict]]:
         first_lines = by_page[spec["page_start"]].page_content.splitlines()[:8]
         if not any("".join(line.split()) == spec["section_title"] for line in first_lines):
             raise ValueError(f"{spec['section_title']} 的起始标题不匹配，请重新确认章节范围。")
-    # 防止将下一份助学金制度误并入奖学金。
+
     if 132 not in by_page or "湖南信息学院国家助学金管理实施办法" not in by_page[132].page_content:
         raise ValueError("第 132 页的下一制度标题不匹配，请重新确认章节范围。")
 
@@ -382,7 +369,7 @@ def build_sections(pages: list[Document]) -> tuple[list[Document], list[dict]]:
             if not body:
                 continue
             if parts:
-                position += 1  # 页面之间保留换行，不猜测表格或段落连接方式
+                position += 1
             spans.append({"page_number": page_number, "start": position, "end": position + len(body)})
             parts.append(body)
             position += len(body)
@@ -402,7 +389,6 @@ def build_sections(pages: list[Document]) -> tuple[list[Document], list[dict]]:
 
 
 def _slice_with_pages(doc: Document, start: int, end: int) -> Document:
-    """按字符范围取内容，同时把范围准确映射回 PDF 页码。"""
     while start < end and doc.page_content[start].isspace():
         start += 1
     while end > start and doc.page_content[end - 1].isspace():
@@ -422,7 +408,6 @@ def _slice_with_pages(doc: Document, start: int, end: int) -> Document:
 
 
 def build_parent_documents(sections: list[Document]) -> list[Document]:
-    """按章及附件组织父级资料，允许跨页，不跨奖学金制度；无章标题的制度整体保留。"""
     parents = []
     for section in sections:
         text = section.page_content
@@ -435,7 +420,7 @@ def build_parent_documents(sections: list[Document]) -> list[Document]:
                 stripped = line.strip()
                 if re.match(r"^第[一二三四五六七八九十百零〇两0-9]+章", stripped):
                     title = stripped
-                    # 如“第二章”和“奖励标准与评选条件”被 OCR 分为两行
+
                     if re.fullmatch(r"第[一二三四五六七八九十百零〇两0-9]+章", title) and i + 1 < len(lines):
                         title += " " + lines[i + 1].strip()
                     boundaries[offset] = title
@@ -467,7 +452,6 @@ def build_parent_documents(sections: list[Document]) -> list[Document]:
 def split_child_documents(
     parents: list[Document], chunk_size: int = CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP,
 ) -> list[Document]:
-    """小片段用于检索；parent_id 用于随后扩展完整父级上下文。"""
     chunks = []
     page_counts = Counter()
     for parent in parents:
@@ -490,7 +474,7 @@ def split_child_documents(
                 raise ValueError("无法准确定位子片段，停止生成错误的来源页码。")
             child = _slice_with_pages(parent, start, end)
             metadata = child.metadata.copy()
-            spans = metadata.pop("page_spans")  # Chroma 元数据保持为标量
+            spans = metadata.pop("page_spans")
             metadata.pop("parent_index", None)
             metadata["page_numbers"] = ",".join(str(s['page_number']) for s in spans)
             page_counts[metadata["page_number"]] += 1
@@ -511,7 +495,6 @@ def process_structured_documents(
     documents: list[Document], output_dir: Path,
     chunk_size: int = CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP,
 ) -> dict:
-    """生成可检查的第二版资料；不修改 OCR，也不操作数据库。"""
     cleaned = clean_documents(documents)
     sections, margin_audit = build_sections(cleaned)
     parents = build_parent_documents(sections)
@@ -559,7 +542,7 @@ def main() -> None:
     if not pdf_path.is_file():
         raise FileNotFoundError(f"找不到 PDF：{pdf_path}")
     documents = load_ocr_documents(ocr_dir, pdf_path)
-    # 正常项目用已安装的 PyMuPDF；备用运行环境也可以用 pypdf 只读取页数。
+
     try:
         import pymupdf
     except ImportError:
@@ -572,7 +555,7 @@ def main() -> None:
     if any(extraction_report[key] for key in ("missing_pages", "unexpected_pages", "duplicate_pages")):
         raise ValueError("页面完整性检查未通过。")
     report = process_structured_documents(documents, output_dir)
-    # 记录实际输入内容，未来入库时可核对版本。
+
     manifest = {
         "pdf_path": str(pdf_path),
         "pdf_sha256": hashlib.sha256(pdf_path.read_bytes()).hexdigest(),
@@ -580,7 +563,7 @@ def main() -> None:
         "chunks_sha256": hashlib.sha256((output_dir / 'chunks.json').read_bytes()).hexdigest(),
         "parents_sha256": hashlib.sha256((output_dir / 'parents.json').read_bytes()).hexdigest(),
         "split_version": report['split_version'], "chunk_size": CHUNK_SIZE, "chunk_overlap": CHUNK_OVERLAP,
-        # 非奖学金页允许为空（封面、插页等），记入 manifest 供入库时核对。
+
         "empty_pages": extraction_report["empty_pages"],
     }
     (output_dir / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')

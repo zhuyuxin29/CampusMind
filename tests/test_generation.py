@@ -61,7 +61,6 @@ class GenerationTests(unittest.TestCase):
             self.assertEqual(g.answer_question("问题", self.docs)["status"], "insufficient")
 
     def test_model_failures(self):
-        # P1-2：截断、空回答和接口异常都抛可安全展示的 ServiceError。
         client = Mock()
         with patch.object(g, "_get_answer_llm", return_value=client):
             for response in (AIMessage(content=""), AIMessage(content="半句", response_metadata={"finish_reason": "length"})):
@@ -73,7 +72,6 @@ class GenerationTests(unittest.TestCase):
                 g.generate_answer(["问题"])
 
     def test_is_insufficient_answer_tolerates_noise(self):
-        # B1：固定“资料不足”句子允许空白、标点、Markdown 和前后缀。
         base = g.make_insufficient_answer()
         for answer in (base, f" {base} ", f"抱歉，{base}", f"**{base}**\n",
                        "当前资料不足以回答这个问题"):
@@ -85,7 +83,7 @@ class GenerationTests(unittest.TestCase):
 
     def test_citation_support_ignores_citation_digits(self):
         sources = {1: {"content": "示例规定：须满足甲条件，乙情况除外。"}}
-        # 引用编号 [1] 里的数字不能当成正文数字，否则会误判缺少依据。
+
         self.assertTrue(g.citation_support("示例结论[1]。", sources)["supported"])
         self.assertFalse(g.citation_support("食堂有500个鸡腿[1]。", sources)["supported"])
         self.assertFalse(g.citation_support("完全无关的结论[1]。", sources)["supported"])

@@ -1,4 +1,3 @@
-"""python -m evaluation.run_evaluation --check-only 或 --run [--limit 3]。"""
 import argparse
 import csv
 import hashlib
@@ -69,7 +68,7 @@ def score_result(case: dict, result: dict) -> dict:
     cited = {s.get('metadata', {}).get('parent_id') for s in result.get('sources', [])}
     return {
         'status_match': result.get('status') == case['expected_status'],
-        # 仅衡量返回引用中是否包含预设依据，不是检索召回率或答案正确率。
+
         'reference_parent_coverage': len(expected & cited) / len(expected) if expected else None,
         'manual_review': {'correctness': None, 'completeness': None, 'citation_support': None, 'notes': ''},
     }
@@ -95,7 +94,7 @@ def run_cases(data, cases, output_dir, ask_fn, session_factory, settings):
                       'answer_points': case['answer_points'], 'evidence': case['evidence'],
                       'human_verified': case['human_verified'], 'result': result, **score_result(case, result)}
             file.write(json.dumps(record, ensure_ascii=False) + '\n')
-            file.flush()  # 中断时保留已完成的题目。
+            file.flush()
             records.append(record)
             print(f"{case['id']}：{result['status']}", flush=True)
     coverage = [r['reference_parent_coverage'] for r in records if r['reference_parent_coverage'] is not None]

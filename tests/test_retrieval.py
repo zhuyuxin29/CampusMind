@@ -25,7 +25,6 @@ def child(key, score=0.9):
         "rerank_score": score, "rerank_rank": 1, "chunk_id": key + "-child"})
 
 
-
 class ModuleTests(unittest.TestCase):
     def test_display_range(self):
         self.assertIn("测试制度｜PDF 第 1–2 页", ret.format_document_source(parent("a", "正文")))
@@ -58,7 +57,6 @@ class ModuleTests(unittest.TestCase):
                 ret.fuse_rankings([docs], **kwargs)
 
     def test_open_index_validates_contract(self):
-        # P1-4：启动时同时校验父级快照与版本记录中的片段数量。
         parents = {"parent": parent("parent", "父级原文")}
         store = Mock()
         store.get.return_value = {

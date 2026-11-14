@@ -1,13 +1,3 @@
-"""正式资料入库入口。
-
-python ingest.py --check-only   校验已处理资料，不调用模型、不写数据库。
-python ingest.py                校验后入库，复用已有模块的断点续传和去重。
-python ingest.py --collection-name campus_handbook_bge_m3_v3
-
-输入为 config.py 指定的 PDF 和 structured_v2 处理结果。
-此入口不自动 OCR 或切分；资料变化后先运行文档处理模块。
-"""
-
 import argparse
 import sys
 
@@ -60,7 +50,6 @@ def main(argv: list[str] | None = None) -> int:
         print("\n已中断。修复问题后可重新执行，同版本已成功入库的片段会被跳过。", file=sys.stderr)
         return 130
     except Exception as exc:
-        # SDK 异常可能带请求内容，不直接输出原始异常正文。
         print(f"\n入库未完成（{type(exc).__name__}）。请检查网络、密钥、额度和目录权限后重试。",
               file=sys.stderr)
     return 1

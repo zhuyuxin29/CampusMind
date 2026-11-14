@@ -1,15 +1,3 @@
-"""统一问答服务。界面调用 ask(question, session)，不要再次保存本轮问答。
-
-status: answered / insufficient / needs_clarification / invalid_input / error。
-timings_ms 的单位是毫秒，未执行的阶段为 None；首次初始化耗时单独记录。
-服务复用检索资源，ChatSession 必须由界面为每个用户单独创建。
-同一会话的请求应串行提交。知识库重建后重启服务以重新加载缓存。
-
-并发：索引资源（混合检索器与父级快照）在首次请求时经 _resource_lock
-惰性初始化，之后只读、不再变更，因此不同会话的 ask() 可并发调用；
-同一 ChatSession 仍需串行（历史为可变状态，未加锁）。
-"""
-
 from config import ANSWER_ATTEMPTS, COLLECTION_NAME, HISTORY_ROUNDS, missing_api_keys
 
 import json
@@ -54,8 +42,6 @@ STAGE_LABELS = dict(zip(STAGES, (
 
 
 def _failure_message(stage: str, exc: Exception) -> str:
-    """按异常类型给出可操作提示，不暴露 SDK 原始正文。"""
-    # 项目内 ServiceError 的消息是给用户看的中文说明，可以原样展示。
     if isinstance(exc, ServiceError):
         message = str(exc).strip()
         if message:
@@ -78,32 +64,18 @@ def _failure_message(stage: str, exc: Exception) -> str:
 
 
 class QAService:
-    """延迟加载并复用知识库及 BM25；不在服务中保存用户聊天历史。
-
-    线程安全：_get_resources() 用锁保证惰性初始化只执行一次；初始化完成后
-    共享的检索资源只读，因此多个会话可并发调用 ask()。ChatSession 属于单个
-    用户的可变状态，仍应由界面保证同一会话内串行提交。
-    """
-
     def __init__(self, collection_name: str = COLLECTION_NAME):
         self.collection_name = collection_name
         self._resources = None
         self._resource_lock = Lock()
 
     def _get_resources(self):
-        """惰性打开并校验索引；成功后才缓存，失败后下次调用仍可重试。"""
         with self._resource_lock:
             if self._resources is None:
                 self._resources = open_index(self.collection_name)
             return self._resources
 
     def ask(self, question: str, session: ChatSession) -> dict:
-        """完成一轮问答并返回可直接展示、可 JSON 序列化的结果。
-
-        仅 answered 和 insufficient 保存到会话；澄清、无效输入及故障不保存。
-        引用校验失败不会返回未经核验的回答，也不会进入 error，而是重试一次
-        后降级为 insufficient，并用 insufficient_reason 区分原因。
-        """
         started = perf_counter()
         stage = "validate"
         result = {
@@ -117,7 +89,7 @@ class QAService:
             "timings_ms": {name: None for name in STAGES},
         }
 
-        # 没配置密钥时直接说明原因，避免被后面的阶段包装成“网络/额度不可用”。
+
         missing = missing_api_keys()
         if missing:
             result.update(
@@ -140,8 +112,8 @@ class QAService:
         try:
             question = run("validate", validate_question, question)
             result["question"] = question
-            # Streamlit 热更新后旧会话仍在 session_state 中，但类对象身份可能变化。
-            # 校验服务实际依赖的接口，保留原会话及历史，不依赖 isinstance。
+
+
             if not all(callable(getattr(session, method, None))
                        for method in ("get_recent_history", "add_turn")):
                 raise ValueError("会话不可用，请开启新对话后重试。")
@@ -168,7 +140,7 @@ class QAService:
                     collection_name=self.collection_name, stats=selection_stats,
                 )
                 result["context_count"] = len(docs)
-                # 全部父级都被预算跳过时 docs 为空，只能靠 stats 判断发生过裁剪。
+
                 result["context_incomplete"] = bool(
                     selection_stats.get("truncated")
                     or any(doc.metadata.get("context_incomplete") for doc in docs)
@@ -208,7 +180,6 @@ class QAService:
         except ClarificationNeeded as exc:
             result.update(status="needs_clarification", message=str(exc), answer=str(exc))
         except Exception as exc:
-            # 日志只记录阶段与异常类型，不把 SDK 异常正文或请求数据写入结果。
             logger.warning("问答未完成：阶段=%s 异常=%s", stage, type(exc).__name__)
             logger.debug("问答异常详情", exc_info=True)
             if stage == "validate" and isinstance(exc, ValueError):
@@ -223,7 +194,6 @@ class QAService:
 
 @lru_cache(maxsize=1)
 def get_qa_service() -> QAService:
-    """应用内复用一个服务；导入和创建服务时都不调用模型或加载数据库。"""
     return QAService()
 
 

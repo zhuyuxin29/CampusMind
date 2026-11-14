@@ -1,8 +1,3 @@
-"""DeepSeek 接口冒烟测试脚本。
-
-手动运行：.venv/Scripts/python.exe smoke_api.py
-会实际调用 DeepSeek 接口，可能消耗账户额度；不是离线测试，也不覆盖完整 RAG 流程。
-"""
 import os
 from pathlib import Path
 
@@ -11,7 +6,6 @@ from openai import OpenAI
 
 
 def get_completion(prompt):
-    # 读取与当前脚本同一文件夹中的 .env
     load_dotenv(Path(__file__).parent / ".env")
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:

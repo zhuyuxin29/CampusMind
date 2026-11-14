@@ -1,17 +1,3 @@
-"""统一调试 CLI：按阶段查看查询处理、召回、重排与回答。
-
-用法（项目根目录，先完成资料入库）：
-  python -m campusmind.cli --stage query       # 查询处理：补全 + 改写
-  python -m campusmind.cli --stage retrieve    # 混合召回
-  python -m campusmind.cli --stage rerank      # 重排 + 父级扩展
-  python -m campusmind.cli --stage answer      # 完整问答（调用模型，保存会话）
-
-各阶段共享同一个混合检索器；answer 阶段直接复用 QAService，与网页/终端
-入口保持相同的引用重试与降级行为。原先分散在 query_processing/retrieval/
-reranking/generation 各自 main() 的调试逻辑集中在此，各模块的 main() 仍可
-运行并委托到这里。
-"""
-
 import argparse
 import json
 import logging
@@ -82,7 +68,6 @@ def _print_context(context_docs) -> None:
 
 
 def _print_answer(result: dict) -> None:
-    """打印完整问答结果；answer 阶段与网页入口使用同一份结果结构。"""
     print(f"\n状态：{result.get('status', 'error')}")
     print(result.get("answer") or result.get("message") or "本轮没有返回内容。")
     if result.get("insufficient_reason"):
@@ -103,7 +88,6 @@ def _print_answer(result: dict) -> None:
 
 
 def _resolve(question: str, history: list[dict]):
-    """validate → contextualize → rewrite → normalize，返回完整问题与检索查询。"""
     question = validate_question(question)
     standalone = contextualize_question(question, history)
     rewrites = rewrite_queries(standalone)
@@ -111,7 +95,6 @@ def _resolve(question: str, history: list[dict]):
 
 
 def run(stage: str) -> None:
-    """进入指定阶段的交互式调试循环。"""
     logging.basicConfig(level=logging.WARNING)
     jieba.setLogLevel(logging.WARNING)
 
@@ -120,7 +103,7 @@ def run(stage: str) -> None:
 
     need_index = stage in {"retrieve", "rerank"}
     retriever = build_hybrid_retriever(COLLECTION_NAME) if need_index else None
-    # answer 阶段复用统一问答服务，保留引用重试和失败降级行为。
+
     service = QAService(COLLECTION_NAME) if stage == "answer" else None
     session = ChatSession(history_rounds=HISTORY_ROUNDS)
 
@@ -132,7 +115,6 @@ def run(stage: str) -> None:
         try:
             question = input("\n请输入问题：").strip()
         except (EOFError, KeyboardInterrupt):
-            # 与 main.py 一致：Ctrl+C / 关闭输入时正常退出，不打印堆栈。
             print()
             break
         if question.lower() in {"exit", "quit"}:

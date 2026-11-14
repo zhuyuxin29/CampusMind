@@ -1,4 +1,3 @@
-"""团团校园问答：python -m streamlit run app.py"""
 from html import escape
 from datetime import datetime
 
@@ -181,7 +180,7 @@ def handle_question(question):
                 result = {"status": "error", "message": "哎呀，这次查询没有完成，请稍后再试一下～", "sources": []}
             progress.update(label="这次查询没有完成" if result['status'] == 'error' else "团团整理好啦", state="error" if result['status'] == 'error' else "complete")
     st.session_state.display_turns.append({"question": question, "result": result, "time": datetime.now().strftime("%H:%M")})
-    st.rerun()  # 更新左侧记录；问答调用只发生于提交，不在重绘时再次执行。
+    st.rerun()
 
 
 def main():

@@ -1,5 +1,3 @@
-"""回答生成：在项目根目录运行 python -m campusmind.generation。"""
-
 from config import (
     DEEPSEEK_MODEL,
     DEEPSEEK_BASE_URL,
@@ -26,7 +24,7 @@ from campusmind.query_processing import validate_question
 
 
 CITATION_PATTERN = re.compile(r"\[([0-9]+)\]")
-# 用于识别“资料不足”固定回答时忽略空白、标点和 Markdown 装饰。
+
 ANSWER_NOISE_PATTERN = re.compile(
     r"[\s\u3000，。；：、！？,.;:!?（）()\[\]【】《》\"'“”‘’*#>「」]"
 )
@@ -39,7 +37,7 @@ CITATION_RETRY_HINT = (
 
 
 class CitationCheckFailed(ValueError):
-    """回答的引用编号或语义支持不满足要求，需要重试或降级为资料不足。"""
+    pass
 
 
 SYSTEM_PROMPT = """
@@ -62,7 +60,6 @@ SYSTEM_PROMPT = """
 
 
 def format_context(documents: list[Document]) -> tuple[str, dict[int, dict]]:
-    """跳过空片段，连续编号，返回 JSON 资料及保留原文的来源映射。"""
     records = []
     source_map = {}
     for doc in documents:
@@ -100,7 +97,6 @@ def format_context(documents: list[Document]) -> tuple[str, dict[int, dict]]:
 
 
 def build_messages(question: str, context: str, history: list[dict] | None = None) -> list:
-    """历史使用 ChatSession 的 question/answer 格式，不带旧来源。"""
     question = validate_question(question)
     if not isinstance(context, str):
         raise ValueError("context 必须是 format_context 返回的字符串。")
@@ -123,7 +119,6 @@ def build_messages(question: str, context: str, history: list[dict] | None = Non
 
 @lru_cache(maxsize=1)
 def _get_answer_llm():
-    """单独创建文本回答客户端，不复用查询处理的 JSON 输出模式。"""
     api_key = get_api_key("DEEPSEEK_API_KEY")
     return ChatOpenAI(
         model=DEEPSEEK_MODEL,
@@ -138,7 +133,6 @@ def _get_answer_llm():
 
 
 def generate_answer(messages: list) -> str:
-    """接口异常、截断和空响应明确报错，不能伪装成资料不足。"""
     if not messages:
         raise ValueError("messages 不能为空。")
     llm = _get_answer_llm()
@@ -155,12 +149,11 @@ def generate_answer(messages: list) -> str:
 
 
 def validate_citations(answer: str, source_map: dict[int, dict]) -> dict:
-    """只校验 [数字] 的编号存在性，不验证语义或每句话是否有依据。"""
     if not isinstance(answer, str):
         raise ValueError("answer 必须是字符串。")
     cited = sorted({int(value) for value in CITATION_PATTERN.findall(answer)})
     invalid = [number for number in cited if number not in source_map]
-    # 数字组合或全角括号不是约定的引用格式，不能漏检后当成合法引用。
+
     malformed = re.findall(r"\[[0-9]+\s*[,，、\-–][0-9\s,，、\-–]*\]|[【［][0-9]+[】］]", answer)
     return {
         "valid": not invalid and not malformed,
@@ -180,19 +173,12 @@ def _bigrams(text: str) -> set[str]:
 
 
 def is_insufficient_answer(answer: str) -> bool:
-    """规范化后判断是否为固定“资料不足”回答，容忍空白、标点和语气前后缀。"""
     if not isinstance(answer, str):
         raise ValueError("answer 必须是字符串。")
     return INSUFFICIENT_CORE in _normalize_for_match(answer)
 
 
 def citation_support(answer: str, source_map: dict[int, dict]) -> dict:
-    """检查每个带引用句子与引用原文是否有词面/数字重叠。
-
-    只做可解释的轻量校验：先去掉引用编号本身，句子含数字时引用原文必须
-    出现同一数字；否则要求字符二元组达到最小重叠比例。用于拦截“引用编号
-    存在但内容无关”，不判断回答是否正确。
-    """
     if not isinstance(answer, str):
         raise ValueError("answer 必须是字符串。")
 
@@ -206,7 +192,7 @@ def citation_support(answer: str, source_map: dict[int, dict]) -> dict:
             for number in cited
             if number in source_map
         )
-        # 引用编号自身的数字不能参与数字一致性检查。
+
         sentence_norm = _normalize_for_match(CITATION_PATTERN.sub("", sentence))
         evidence_norm = _normalize_for_match(evidence)
         if not sentence_norm or not evidence_norm:
@@ -231,7 +217,6 @@ def citation_support(answer: str, source_map: dict[int, dict]) -> dict:
 
 
 def select_cited_sources(answer: str, source_map: dict[int, dict]) -> list[dict]:
-    """返回通过编号与语义校验的来源；不合格时抛出 CitationCheckFailed。"""
     check = validate_citations(answer, source_map)
     if not check["valid"] or not check["has_citations"]:
         raise CitationCheckFailed("回答引用编号无效、格式不正确或缺少引用。")
@@ -242,7 +227,6 @@ def select_cited_sources(answer: str, source_map: dict[int, dict]) -> list[dict]
 
 
 def build_citation_retry_messages(messages: list) -> list:
-    """在原始提示后追加引用纠正提示，用于重试一次。"""
     from langchain_core.messages import HumanMessage
 
     return [*messages, HumanMessage(content=CITATION_RETRY_HINT)]
@@ -253,7 +237,6 @@ def generate_answer_with_citation_retry(
     source_map: dict[int, dict],
     attempts: int = ANSWER_ATTEMPTS,
 ) -> tuple[str, list[dict]]:
-    """生成回答并校验引用；不合格时带纠正提示重试，仍失败则降级为资料不足。"""
     if attempts < 1:
         raise ValueError("attempts 必须大于等于 1。")
     for attempt in range(attempts):
@@ -273,7 +256,6 @@ def make_insufficient_answer() -> str:
 
 
 def answer_question(question: str, documents: list[Document], history: list[dict] | None = None) -> dict:
-    """串联五个步骤；只返回本轮实际引用的来源，便于保存会话。"""
     question = validate_question(question)
     context, source_map = format_context(documents)
     if not source_map:
@@ -284,13 +266,11 @@ def answer_question(question: str, documents: list[Document], history: list[dict
     try:
         sources = select_cited_sources(answer, source_map)
     except CitationCheckFailed as exc:
-        # 不删除错误编号后展示原回答，也不把校验失败写进聊天历史。
         raise ServiceError("回答引用校验未通过（编号不存在、格式不正确或内容不支持），请重试。") from exc
     return {"answer": answer, "sources": sources, "status": "answered"}
 
 
 def main() -> None:
-    """调试入口：见 campusmind.cli（--stage answer）。"""
     from campusmind.cli import run
 
     run("answer")
@@ -298,4 +278,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

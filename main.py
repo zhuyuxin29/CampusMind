@@ -1,13 +1,9 @@
-# CampusMind 终端问答入口：在项目根目录运行 python main.py
-# CMD启动：cd /d D:\VsCodeProjects\CampusMind && .\.venv\Scripts\python.exe -m campusmind.qa_service
-
 from config import HISTORY_ROUNDS
 from campusmind.qa_service import ask
 from campusmind.session_manager import ChatSession
 
 
 def print_result(result: dict) -> None:
-    """展示回答或提示，以及本轮实际引用的来源。"""
     status = result.get("status", "error")
     labels = {
         "answered": "回答完成",
@@ -57,7 +53,7 @@ def main() -> None:
                 print("当前会话已清空。")
                 continue
             print("正在查找资料并整理回答……", flush=True)
-            # ask 已负责保存有效问答，这里不要再次调用 session.add_turn。
+
             result = ask(question, session)
             print_result(result)
     except (EOFError, KeyboardInterrupt):

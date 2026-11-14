@@ -1,5 +1,3 @@
-# 知识库第二版：校验结构化结果，只向量化子片段，并保存对应父级资料
-
 from config import (
     PROJECT_DIR,
     PDF_PATH,
@@ -34,7 +32,6 @@ from langchain_openai import OpenAIEmbeddings
 
 
 def create_embeddings() -> OpenAIEmbeddings:
-    """入库和问题检索使用同一个嵌入模型。"""
     api_key = get_api_key("SILICONFLOW_API_KEY")
     return OpenAIEmbeddings(
         model=EMBEDDING_MODEL,
@@ -48,7 +45,6 @@ def create_embeddings() -> OpenAIEmbeddings:
 
 
 def open_vector_store(collection_name: str) -> Chroma:
-    """创建或打开指定集合；此操作本身不生成文本向量。"""
     _validate_collection_name(collection_name)
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     return Chroma(
@@ -59,7 +55,6 @@ def open_vector_store(collection_name: str) -> Chroma:
 
 
 def make_chunk_id(doc: Document, index: int) -> str:
-    """新版直接使用文档处理模块生成的 ID；保留旧片段算法供兼容调用。"""
     if doc.metadata.get("split_version") == SPLIT_VERSION:
         chunk_id = doc.metadata.get("chunk_id")
         if not isinstance(chunk_id, str) or not re.fullmatch(r"[0-9a-f]{64}", chunk_id):
@@ -90,7 +85,6 @@ def _read_json(path: Path):
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    """写完临时文件后再替换，避免中断时留下半份版本记录。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
         temporary_path = Path(file.name)
@@ -111,7 +105,6 @@ def _save_json(path: Path, data: dict) -> None:
 
 
 def _validate_collection_name(name: str) -> None:
-    # 集合名还用于版本目录，限制为简单名称，不能包含路径分隔符。
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,61}[A-Za-z0-9]", name):
         raise ValueError("集合名需为 3–63 位字母、数字、下划线或短横线，首尾为字母或数字。")
 
@@ -144,7 +137,6 @@ def _make_parent_map(parents: list[Document]) -> dict[str, Document]:
 
 
 def _validate_relationships(chunks: list[Document], parent_map: dict[str, Document]) -> None:
-    """入库前检查父子关联、原文位置、页面范围和 Chroma 元数据格式。"""
     seen_ids = set()
     referenced_parents = set()
     for i, child in enumerate(chunks):
@@ -177,7 +169,7 @@ def _validate_relationships(chunks: list[Document], parent_map: dict[str, Docume
         if m.get("page_numbers") != ",".join(map(str, pages)) or m.get("page") != pages[0] - 1:
             raise ValueError("子片段的页面列表或索引错误。")
         chunk_id = make_chunk_id(child, i)
-        # 与文档处理模块的 _stable_id(parent_id, start, end, prefix_text) 一致。
+
         expected_id = hashlib.sha256(json.dumps(
             [parent_id, start, end, child.page_content[:prefix]],
             ensure_ascii=False, separators=(",", ":"),
@@ -190,7 +182,6 @@ def _validate_relationships(chunks: list[Document], parent_map: dict[str, Docume
 
 
 def load_structured_documents(pdf_path: Path) -> tuple[list[Document], dict[str, Document], dict, bytes]:
-    """核对 manifest 后读取新版片段，不进行 OCR、清洗或重新切分。"""
     pdf_path = Path(pdf_path).resolve()
     manifest = _read_json(STRUCTURED_DIR / "manifest.json")
     if not isinstance(manifest, dict) or manifest.get("split_version") != SPLIT_VERSION:
@@ -221,7 +212,6 @@ def load_structured_documents(pdf_path: Path) -> tuple[list[Document], dict[str,
 
 
 def ingest_documents(chunks: list[Document], store: Chroma, batch_size: int = BATCH_SIZE) -> dict:
-    """只向量化子片段；跳过已有 ID，分批写入并核对是否全部保存。"""
     if not chunks or batch_size < 1:
         raise ValueError("片段不能为空，batch_size 必须大于 0。")
     if any(not doc.page_content.strip() for doc in chunks):
@@ -257,11 +247,6 @@ def get_index_status(store: Chroma) -> dict:
 
 
 def load_index_manifest(collection_name: str = COLLECTION_NAME) -> dict:
-    """读取并校验集合版本记录；不读取父级或片段正文。
-
-    启动问答时用它交叉检查 Chroma 实际片段数，避免集合被部分删除后静默
-    使用残缺知识库。
-    """
     _validate_collection_name(collection_name)
     version_dir = INDEX_ROOT / collection_name
     record = _read_json(version_dir / "index_manifest.json")
@@ -276,7 +261,6 @@ def load_index_manifest(collection_name: str = COLLECTION_NAME) -> dict:
 
 
 def load_parent_documents(collection_name: str = COLLECTION_NAME) -> dict[str, Document]:
-    """读取该集合的父级快照；不读取后来可能被重新生成的 structured_v2。"""
     record = load_index_manifest(collection_name)
     version_dir = INDEX_ROOT / collection_name
     data = (version_dir / "parents.json").read_bytes()
@@ -289,7 +273,6 @@ def load_parent_documents(collection_name: str = COLLECTION_NAME) -> dict[str, D
 
 
 def build_knowledge_base(pdf_path: Path, collection_name: str) -> dict:
-    """校验新版资料 → 建立版本快照 → 子片段入库 → 标记构建完成。"""
     _validate_collection_name(collection_name)
     if collection_name == LEGACY_COLLECTION_NAME:
         raise ValueError("不能把新版资料写入旧 v1 集合，请使用 v2 或新的集合名。")
@@ -307,7 +290,7 @@ def build_knowledge_base(pdf_path: Path, collection_name: str) -> dict:
         if _file_sha256(version_dir / "parents.json") != identity["parents_sha256"]:
             raise ValueError("集合父级快照校验失败。")
 
-    # 资料全部验证后才创建模型客户端和数据库集合。
+
     store = open_vector_store(collection_name)
     expected_ids = {make_chunk_id(doc, i) for i, doc in enumerate(chunks)}
     existing_ids = set(store.get(include=[])["ids"])
@@ -321,7 +304,7 @@ def build_knowledge_base(pdf_path: Path, collection_name: str) -> dict:
         "collection_name": collection_name, "identity": identity, "state": "building",
         "chunk_count": len(chunks), "parent_count": len(parent_map),
     }
-    # 中途失败保留 building；重跑同一版本会跳过已成功写入的子片段。
+
     _save_json(record_path, record)
     report = ingest_documents(chunks, store)
     status = get_index_status(store)
@@ -360,4 +343,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -25,7 +25,6 @@ def child(key, score=0.9):
         "rerank_score": score, "rerank_rank": 1, "chunk_id": key + "-child"})
 
 
-
 class ModuleTests(unittest.TestCase):
     def test_generic_scholarship_stops_before_api(self):
         for question in ("奖学金如何申请？", "励志奖学金需要哪些材料？", "奖学金申请条件有哪些？"):
@@ -39,7 +38,6 @@ class ModuleTests(unittest.TestCase):
             self.assertFalse(q.needs_scholarship_clarification(question), question)
 
     def test_named_scholarship_not_forced_to_clarify(self):
-        # B6：校级、企业等明确命名的奖学金不再被强制澄清。
         for question in ("校级奖学金如何申请？", "企业奖学金申请条件有哪些？",
                          "校友奖学金怎么申请？", "社会奖学金需要哪些材料？"):
             self.assertFalse(q.needs_scholarship_clarification(question), question)
@@ -54,7 +52,6 @@ class ModuleTests(unittest.TestCase):
         self.assertFalse(q.needs_scholarship_clarification("国家励志奖学金需要哪些材料？"))
 
     def test_validate_question(self):
-        # D 系列：补充输入校验用例。
         for bad in (None, 123, [], {}):
             with self.assertRaises(ValueError):
                 q.validate_question(bad)
